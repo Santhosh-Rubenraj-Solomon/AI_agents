@@ -10,11 +10,13 @@ import { z } from "zod";
 // ─── Tech Profile (auto-detected from codebase) ─────────────────────────────
 
 export const TechProfileSchema = z.object({
-  languages: z.array(z.object({
-    name: z.string(),
-    percentage: z.number(),
-    fileCount: z.number(),
-  })),
+  languages: z.array(
+    z.object({
+      name: z.string(),
+      percentage: z.number(),
+      fileCount: z.number()
+    })
+  ),
   frameworks: z.array(z.string()),
   buildTools: z.array(z.string()),
   databases: z.array(z.string()),
@@ -27,7 +29,7 @@ export const TechProfileSchema = z.object({
   totalFiles: z.number(),
   totalLinesEstimate: z.number(),
   dependencies: z.record(z.string()),
-  devDependencies: z.record(z.string()),
+  devDependencies: z.record(z.string())
 });
 
 // ─── Analysis Result ─────────────────────────────────────────────────────────
@@ -35,40 +37,60 @@ export const TechProfileSchema = z.object({
 export const AnalysisResultSchema = z.object({
   summary: z.string(),
   architecture: z.string(),
-  keyComponents: z.array(z.object({
-    name: z.string(),
-    path: z.string(),
-    purpose: z.string(),
-    type: z.enum(["controller", "service", "model", "middleware", "utility", "config", "test", "migration", "other"]),
-  })),
-  dataModels: z.array(z.object({
-    name: z.string(),
-    path: z.string(),
-    fields: z.array(z.string()),
-    relationships: z.array(z.string()),
-  })),
-  apiEndpoints: z.array(z.object({
-    method: z.string(),
-    path: z.string(),
-    handler: z.string(),
-    description: z.string(),
-  })),
+  keyComponents: z.array(
+    z.object({
+      name: z.string(),
+      path: z.string(),
+      purpose: z.string(),
+      type: z.enum([
+        "controller",
+        "service",
+        "model",
+        "middleware",
+        "utility",
+        "config",
+        "test",
+        "migration",
+        "other"
+      ])
+    })
+  ),
+  dataModels: z.array(
+    z.object({
+      name: z.string(),
+      path: z.string(),
+      fields: z.array(z.string()),
+      relationships: z.array(z.string())
+    })
+  ),
+  apiEndpoints: z.array(
+    z.object({
+      method: z.string(),
+      path: z.string(),
+      handler: z.string(),
+      description: z.string()
+    })
+  ),
   concerns: z.array(z.string()),
-  strengths: z.array(z.string()),
+  strengths: z.array(z.string())
 });
 
 // ─── Breaking Change Analysis ────────────────────────────────────────────────
 
 export const BreakingChangeResultSchema = z.object({
   riskLevel: z.enum(["LOW", "MEDIUM", "HIGH", "BREAKING"]),
-  changeType: z.array(z.enum(["API", "Database", "Message", "Library", "Config", "None"])),
+  changeType: z.array(
+    z.enum(["API", "Database", "Message", "Library", "Config", "None"])
+  ),
   affectedConsumers: z.array(z.string()),
-  findings: z.array(z.object({
-    file: z.string(),
-    change: z.string(),
-    breaking: z.boolean(),
-    impact: z.string(),
-  })),
+  findings: z.array(
+    z.object({
+      file: z.string(),
+      change: z.string(),
+      breaking: z.boolean(),
+      impact: z.string()
+    })
+  ),
   recommendations: z.array(z.string()),
   checklist: z.object({
     dtosChecked: z.boolean(),
@@ -78,8 +100,8 @@ export const BreakingChangeResultSchema = z.object({
     databaseChecked: z.boolean(),
     messagesChecked: z.boolean(),
     consumersChecked: z.boolean(),
-    rollbackChecked: z.boolean(),
-  }),
+    rollbackChecked: z.boolean()
+  })
 });
 
 // ─── Session State (persisted in SQLite) ─────────────────────────────────────
@@ -94,7 +116,7 @@ export const SessionPhaseSchema = z.enum([
   "advising_bugfix",
   "advising_feature",
   "complete",
-  "failed",
+  "failed"
 ]);
 
 export const SessionStateSchema = z.object({
@@ -104,13 +126,83 @@ export const SessionStateSchema = z.object({
   repoUrl: z.string().nullable(),
   repoLocalPath: z.string().nullable(),
   currentPhase: SessionPhaseSchema,
-  taskType: z.enum(["bugfix", "feature", "breaking_changes", "architecture", "general"]).nullable(),
+  taskType: z
+    .enum(["bugfix", "feature", "breaking_changes", "architecture", "general"])
+    .nullable(),
   profileJson: z.string().nullable(),
   analysisJson: z.string().nullable(),
   conversationHistory: z.string().default("[]"),
   createdAt: z.number(),
-  updatedAt: z.number(),
+  updatedAt: z.number()
 });
+
+// ─── Inferred types from schemas ─────────────────────────────────────────────
+
+export type TechProfile = z.infer<typeof TechProfileSchema>;
+export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
+export type BreakingChangeResult = z.infer<typeof BreakingChangeResultSchema>;
+export type SessionState = z.infer<typeof SessionStateSchema>;
+
+// ─── Session phases ──────────────────────────────────────────────────────────
+
+export type SessionPhase =
+  | "idle"
+  | "cloning"
+  | "profiling"
+  | "analyzing"
+  | "awaiting_input"
+  | "detecting_breaking_changes"
+  | "advising_bugfix"
+  | "advising_feature"
+  | "complete"
+  | "failed";
+
+// ─── Agent interfaces ────────────────────────────────────────────────────────
+
+export interface AgentResult<T = unknown> {
+  success: boolean;
+  message: string;
+  data?: T;
+  error?: string;
+}
+
+// ─── GitHub repo info ────────────────────────────────────────────────────────
+
+export interface RepoInfo {
+  owner: string;
+  name: string;
+  url: string;
+  localPath: string;
+  defaultBranch: string;
+}
+
+// ─── File analysis entry ─────────────────────────────────────────────────────
+
+export interface FileEntry {
+  path: string;
+  extension: string;
+  sizeBytes: number;
+  language: string;
+}
+
+// ─── Question flow ───────────────────────────────────────────────────────────
+
+export type TaskType =
+  | "bugfix"
+  | "feature"
+  | "breaking_changes"
+  | "architecture"
+  | "general";
+
+export interface ConversationContext {
+  sessionId: string;
+  repoUrl: string;
+  taskType: TaskType;
+  profile?: TechProfile;
+  questions: Array<{ role: "user" | "assistant"; content: string }>;
+  currentStep: number;
+  totalSteps: number;
+}
 
 // ─── AI output parse utilities ───────────────────────────────────────────────
 
@@ -130,7 +222,10 @@ export class AIParseError extends Error {
  * Strips markdown fences, extracts JSON, validates with schema.
  */
 export function parseAIJson<T>(raw: string, schema: z.ZodSchema<T>): T {
-  let cleaned = raw.replace(/```(?:json)?\s*\n?/g, "").replace(/```/g, "").trim();
+  let cleaned = raw
+    .replace(/```(?:json)?\s*\n?/g, "")
+    .replace(/```/g, "")
+    .trim();
 
   let parsed: unknown;
   try {
@@ -143,7 +238,11 @@ export function parseAIJson<T>(raw: string, schema: z.ZodSchema<T>): T {
     try {
       parsed = JSON.parse(match[0]);
     } catch (innerErr) {
-      throw new AIParseError("Extracted JSON block is not valid JSON", raw, innerErr);
+      throw new AIParseError(
+        "Extracted JSON block is not valid JSON",
+        raw,
+        innerErr
+      );
     }
   }
 
@@ -152,7 +251,11 @@ export function parseAIJson<T>(raw: string, schema: z.ZodSchema<T>): T {
     const issues = result.error.issues
       .map((i) => `  ${i.path.join(".")}: ${i.message}`)
       .join("\n");
-    throw new AIParseError(`AI output failed schema validation:\n${issues}`, raw, result.error);
+    throw new AIParseError(
+      `AI output failed schema validation:\n${issues}`,
+      raw,
+      result.error
+    );
   }
 
   return result.data;

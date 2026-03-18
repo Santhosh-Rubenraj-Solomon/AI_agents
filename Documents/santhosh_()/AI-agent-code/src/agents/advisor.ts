@@ -9,7 +9,12 @@
 import { chatAI } from "../services/aiEngine.js";
 import { getFileTree, readRepoFile } from "../services/techDetector.js";
 import { createLogger } from "../utils/logger.js";
-import type { TechProfile, AnalysisResult, TaskType, ConversationContext } from "../types.js";
+import type {
+  TechProfile,
+  AnalysisResult,
+  TaskType,
+  ConversationContext
+} from "../schemas.js";
 
 const log = createLogger("Advisor");
 
@@ -20,7 +25,7 @@ const BUGFIX_QUESTIONS = [
   "Can you share the error message or stack trace (if any)?",
   "Which part of the application is affected? (e.g., API endpoint, UI component, database query)",
   "When did this start happening? Was there a recent change or deployment?",
-  "Can you reproduce the bug consistently? What are the steps to reproduce?",
+  "Can you reproduce the bug consistently? What are the steps to reproduce?"
 ];
 
 const FEATURE_QUESTIONS = [
@@ -28,7 +33,7 @@ const FEATURE_QUESTIONS = [
   "Who are the users/consumers of this feature? (API consumers, UI users, internal services)",
   "Does this feature require new API endpoints, database changes, or message patterns?",
   "Are there any existing components that this feature will interact with or modify?",
-  "What are the acceptance criteria? How will you know the feature is complete?",
+  "What are the acceptance criteria? How will you know the feature is complete?"
 ];
 
 const BREAKING_CHANGE_QUESTIONS = [
@@ -36,22 +41,27 @@ const BREAKING_CHANGE_QUESTIONS = [
   "How many commits back should I analyze for breaking changes? (default: 5)",
   "Are there known downstream consumers or services that depend on this codebase?",
   "Are there any database migrations included in the changes?",
-  "Is there a rollback plan if breaking changes are detected?",
+  "Is there a rollback plan if breaking changes are detected?"
 ];
 
 const ARCHITECTURE_QUESTIONS = [
   "What aspect of the architecture would you like to understand? (data flow, component interaction, deployment, etc.)",
   "Are you looking at a specific feature flow or the overall system design?",
-  "Do you need recommendations for improvements or just documentation of the current state?",
+  "Do you need recommendations for improvements or just documentation of the current state?"
 ];
 
 function getQuestions(taskType: TaskType): string[] {
   switch (taskType) {
-    case "bugfix": return BUGFIX_QUESTIONS;
-    case "feature": return FEATURE_QUESTIONS;
-    case "breaking_changes": return BREAKING_CHANGE_QUESTIONS;
-    case "architecture": return ARCHITECTURE_QUESTIONS;
-    case "general": return ["What would you like to know about this codebase?"];
+    case "bugfix":
+      return BUGFIX_QUESTIONS;
+    case "feature":
+      return FEATURE_QUESTIONS;
+    case "breaking_changes":
+      return BREAKING_CHANGE_QUESTIONS;
+    case "architecture":
+      return ARCHITECTURE_QUESTIONS;
+    case "general":
+      return ["What would you like to know about this codebase?"];
   }
 }
 
@@ -68,12 +78,12 @@ export async function generateAdvisorResponse(
   userMessage: string,
   profile: TechProfile,
   analysis: AnalysisResult | null,
-  repoPath: string,
+  repoPath: string
 ): Promise<string> {
   log.info("Generating advisor response", {
     sessionId: context.sessionId,
     taskType: context.taskType,
-    step: context.currentStep,
+    step: context.currentStep
   });
 
   const fileTree = getFileTree(repoPath, 2);
@@ -82,7 +92,13 @@ export async function generateAdvisorResponse(
     .join("\n");
 
   const analysisContext = analysis
-    ? `\nKEY COMPONENTS:\n${analysis.keyComponents.map((c) => `- ${c.name} (${c.type}): ${c.purpose}`).join("\n")}\n\nAPI ENDPOINTS:\n${analysis.apiEndpoints.map((e) => `- ${e.method} ${e.path}: ${e.description}`).join("\n")}\n\nDATA MODELS:\n${analysis.dataModels.map((m) => `- ${m.name}: ${m.fields.join(", ")}`).join("\n")}`
+    ? `\nKEY COMPONENTS:\n${analysis.keyComponents
+        .map((c) => `- ${c.name} (${c.type}): ${c.purpose}`)
+        .join("\n")}\n\nAPI ENDPOINTS:\n${analysis.apiEndpoints
+        .map((e) => `- ${e.method} ${e.path}: ${e.description}`)
+        .join("\n")}\n\nDATA MODELS:\n${analysis.dataModels
+        .map((m) => `- ${m.name}: ${m.fields.join(", ")}`)
+        .join("\n")}`
     : "";
 
   const taskPrompts: Record<TaskType, string> = {
@@ -139,13 +155,15 @@ Reference specific files and components from the codebase.`,
 
     general: `You are a helpful assistant that answers questions about this open-source codebase.
 Based on the conversation and user's question, provide clear, specific answers.
-Reference actual files and components from the project.`,
+Reference actual files and components from the project.`
   };
 
   const prompt = `${taskPrompts[context.taskType]}
 
 ## Codebase Context
-- Languages: ${profile.languages.map((l) => `${l.name} (${l.percentage}%)`).join(", ")}
+- Languages: ${profile.languages
+    .map((l) => `${l.name} (${l.percentage}%)`)
+    .join(", ")}
 - Frameworks: ${profile.frameworks.join(", ") || "none"}
 - Architecture: ${profile.architecture}
 - Databases: ${profile.databases.join(", ") || "none"}
@@ -164,7 +182,9 @@ Respond concisely but thoroughly. Use markdown formatting. If you reference file
 
   try {
     // Attempt to read any files the user mentions
-    const filePatterns = userMessage.match(/[\w/.-]+\.(ts|js|py|java|go|rs|rb|php|vue|svelte|sql|yaml|yml|json|toml)/g);
+    const filePatterns = userMessage.match(
+      /[\w/.-]+\.(ts|js|py|java|go|rs|rb|php|vue|svelte|sql|yaml|yml|json|toml)/g
+    );
     let fileContents = "";
     if (filePatterns) {
       for (const fp of filePatterns.slice(0, 3)) {
@@ -193,15 +213,19 @@ Respond concisely but thoroughly. Use markdown formatting. If you reference file
 export async function generateTaskSummary(
   context: ConversationContext,
   profile: TechProfile,
-  repoPath: string,
+  repoPath: string
 ): Promise<string> {
   const historyText = context.questions
     .map((q) => `${q.role === "user" ? "User" : "Assistant"}: ${q.content}`)
     .join("\n");
 
-  const prompt = `Summarize this technical conversation about a ${context.taskType} task for the project at ${context.repoUrl}.
+  const prompt = `Summarize this technical conversation about a ${
+    context.taskType
+  } task for the project at ${context.repoUrl}.
 
-Tech Stack: ${profile.frameworks.join(", ")} / ${profile.languages.map((l) => l.name).join(", ")}
+Tech Stack: ${profile.frameworks.join(", ")} / ${profile.languages
+    .map((l) => l.name)
+    .join(", ")}
 
 Conversation:
 ${historyText}

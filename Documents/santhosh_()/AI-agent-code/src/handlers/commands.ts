@@ -35,7 +35,7 @@ import type {
   AnalysisResult,
   TaskType,
   ConversationContext
-} from "../types.js";
+} from "../schemas.js";
 
 const log = createLogger("Commands");
 

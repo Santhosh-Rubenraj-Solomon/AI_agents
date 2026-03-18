@@ -10,7 +10,7 @@ import fs from "node:fs";
 import { simpleGit } from "simple-git";
 import { CONFIG } from "../config.js";
 import { createLogger } from "../utils/logger.js";
-import type { RepoInfo } from "../types.js";
+import type { RepoInfo } from "../schemas.js";
 
 const log = createLogger("GitHub");
 

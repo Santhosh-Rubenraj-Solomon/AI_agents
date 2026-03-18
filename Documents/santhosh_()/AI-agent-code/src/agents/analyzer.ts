@@ -8,8 +8,13 @@
 import { askAI } from "../services/aiEngine.js";
 import { getFileTree, readRepoFile } from "../services/techDetector.js";
 import { createLogger } from "../utils/logger.js";
-import { parseAIJson, AnalysisResultSchema } from "../schemas.js";
-import type { TechProfile, AnalysisResult, AgentResult } from "../types.js";
+import {
+  parseAIJson,
+  AnalysisResultSchema,
+  type TechProfile,
+  type AnalysisResult,
+  type AgentResult
+} from "../schemas.js";
 
 const log = createLogger("Analyzer");
 

@@ -7,11 +7,20 @@
  */
 
 import { askAI } from "../services/aiEngine.js";
-import { getRecentDiff, getChangedFiles, getRecentCommits } from "../services/github.js";
+import {
+  getRecentDiff,
+  getChangedFiles,
+  getRecentCommits
+} from "../services/github.js";
 import { readRepoFile } from "../services/techDetector.js";
 import { createLogger } from "../utils/logger.js";
-import { parseAIJson, BreakingChangeResultSchema } from "../schemas.js";
-import type { TechProfile, BreakingChangeResult, AgentResult } from "../types.js";
+import {
+  parseAIJson,
+  BreakingChangeResultSchema,
+  TechProfile,
+  BreakingChangeResult,
+  AgentResult
+} from "../schemas.js";
 
 const log = createLogger("BreakingChange");
 
@@ -41,11 +50,16 @@ export async function detectBreakingChanges(
           findings: [],
           recommendations: ["No changes detected."],
           checklist: {
-            dtosChecked: true, enumsChecked: true, typesChecked: true,
-            defaultsChecked: true, databaseChecked: true, messagesChecked: true,
-            consumersChecked: true, rollbackChecked: true,
-          },
-        },
+            dtosChecked: true,
+            enumsChecked: true,
+            typesChecked: true,
+            defaultsChecked: true,
+            databaseChecked: true,
+            messagesChecked: true,
+            consumersChecked: true,
+            rollbackChecked: true
+          }
+        }
       };
     }
 
@@ -61,7 +75,9 @@ export async function detectBreakingChanges(
     const prompt = `You are an expert software architect performing a breaking change analysis on a codebase.
 
 ## Codebase Context
-- Languages: ${profile.languages.map((l) => `${l.name} (${l.percentage}%)`).join(", ")}
+- Languages: ${profile.languages
+      .map((l) => `${l.name} (${l.percentage}%)`)
+      .join(", ")}
 - Frameworks: ${profile.frameworks.join(", ") || "none"}
 - Architecture: ${profile.architecture}
 - Databases: ${profile.databases.join(", ") || "none"}
@@ -140,13 +156,17 @@ Respond ONLY with valid JSON (no markdown fences):
     log.info("Breaking change analysis complete", {
       riskLevel: result.riskLevel,
       findings: result.findings.length,
-      breaking: result.findings.filter((f) => f.breaking).length,
+      breaking: result.findings.filter((f) => f.breaking).length
     });
 
     return {
       success: true,
-      message: `Risk: ${result.riskLevel} — ${result.findings.length} findings (${result.findings.filter((f) => f.breaking).length} breaking)`,
-      data: result,
+      message: `Risk: ${result.riskLevel} — ${
+        result.findings.length
+      } findings (${
+        result.findings.filter((f) => f.breaking).length
+      } breaking)`,
+      data: result
     };
   } catch (err) {
     const error = err as Error;
@@ -154,7 +174,7 @@ Respond ONLY with valid JSON (no markdown fences):
     return {
       success: false,
       message: `Breaking change detection failed: ${error.message}`,
-      error: error.message,
+      error: error.message
     };
   }
 }

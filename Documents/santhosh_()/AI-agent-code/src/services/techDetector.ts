@@ -10,126 +10,169 @@ import fs from "node:fs";
 import path from "node:path";
 import { CONFIG } from "../config.js";
 import { createLogger } from "../utils/logger.js";
-import type { TechProfile, FileEntry } from "../types.js";
+import type { TechProfile, FileEntry } from "../schemas.js";
 
 const log = createLogger("TechDetector");
 
 // ─── Language detection by extension ─────────────────────────────────────────
 
 const EXTENSION_LANGUAGE_MAP: Record<string, string> = {
-  ".ts": "TypeScript", ".tsx": "TypeScript",
-  ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
-  ".py": "Python", ".pyw": "Python",
+  ".ts": "TypeScript",
+  ".tsx": "TypeScript",
+  ".js": "JavaScript",
+  ".jsx": "JavaScript",
+  ".mjs": "JavaScript",
+  ".cjs": "JavaScript",
+  ".py": "Python",
+  ".pyw": "Python",
   ".java": "Java",
-  ".kt": "Kotlin", ".kts": "Kotlin",
+  ".kt": "Kotlin",
+  ".kts": "Kotlin",
   ".go": "Go",
   ".rs": "Rust",
   ".rb": "Ruby",
   ".php": "PHP",
   ".cs": "C#",
-  ".cpp": "C++", ".cc": "C++", ".cxx": "C++", ".hpp": "C++",
-  ".c": "C", ".h": "C",
+  ".cpp": "C++",
+  ".cc": "C++",
+  ".cxx": "C++",
+  ".hpp": "C++",
+  ".c": "C",
+  ".h": "C",
   ".swift": "Swift",
   ".dart": "Dart",
   ".scala": "Scala",
-  ".ex": "Elixir", ".exs": "Elixir",
+  ".ex": "Elixir",
+  ".exs": "Elixir",
   ".clj": "Clojure",
   ".lua": "Lua",
-  ".r": "R", ".R": "R",
+  ".r": "R",
+  ".R": "R",
   ".sql": "SQL",
-  ".graphql": "GraphQL", ".gql": "GraphQL",
+  ".graphql": "GraphQL",
+  ".gql": "GraphQL",
   ".proto": "Protobuf",
   ".vue": "Vue",
-  ".svelte": "Svelte",
+  ".svelte": "Svelte"
 };
 
 // ─── Framework detection from dependencies ───────────────────────────────────
 
 const FRAMEWORK_INDICATORS: Record<string, string[]> = {
-  "React": ["react", "react-dom"],
+  React: ["react", "react-dom"],
   "Next.js": ["next"],
   "Vue.js": ["vue"],
   "Nuxt.js": ["nuxt"],
-  "Angular": ["@angular/core"],
-  "Svelte": ["svelte"],
-  "SvelteKit": ["@sveltejs/kit"],
-  "Express": ["express"],
-  "NestJS": ["@nestjs/core"],
-  "Fastify": ["fastify"],
-  "Koa": ["koa"],
-  "Hono": ["hono"],
-  "Django": ["django"],
-  "Flask": ["flask"],
-  "FastAPI": ["fastapi"],
+  Angular: ["@angular/core"],
+  Svelte: ["svelte"],
+  SvelteKit: ["@sveltejs/kit"],
+  Express: ["express"],
+  NestJS: ["@nestjs/core"],
+  Fastify: ["fastify"],
+  Koa: ["koa"],
+  Hono: ["hono"],
+  Django: ["django"],
+  Flask: ["flask"],
+  FastAPI: ["fastapi"],
   "Spring Boot": ["spring-boot-starter"],
-  "Rails": ["rails"],
-  "Laravel": ["laravel/framework"],
-  "Gin": ["github.com/gin-gonic/gin"],
-  "Actix": ["actix-web"],
+  Rails: ["rails"],
+  Laravel: ["laravel/framework"],
+  Gin: ["github.com/gin-gonic/gin"],
+  Actix: ["actix-web"],
   "Tailwind CSS": ["tailwindcss"],
-  "Prisma": ["prisma", "@prisma/client"],
-  "TypeORM": ["typeorm"],
-  "Drizzle": ["drizzle-orm"],
-  "Sequelize": ["sequelize"],
-  "Mongoose": ["mongoose"],
+  Prisma: ["prisma", "@prisma/client"],
+  TypeORM: ["typeorm"],
+  Drizzle: ["drizzle-orm"],
+  Sequelize: ["sequelize"],
+  Mongoose: ["mongoose"]
 };
 
 const DATABASE_INDICATORS: Record<string, string[]> = {
-  "PostgreSQL": ["pg", "postgres", "@prisma/client", "typeorm"],
-  "MySQL": ["mysql", "mysql2"],
-  "MongoDB": ["mongoose", "mongodb"],
-  "Redis": ["redis", "ioredis"],
-  "SQLite": ["better-sqlite3", "sqlite3"],
-  "DynamoDB": ["@aws-sdk/client-dynamodb"],
-  "Elasticsearch": ["@elastic/elasticsearch"],
+  PostgreSQL: ["pg", "postgres", "@prisma/client", "typeorm"],
+  MySQL: ["mysql", "mysql2"],
+  MongoDB: ["mongoose", "mongodb"],
+  Redis: ["redis", "ioredis"],
+  SQLite: ["better-sqlite3", "sqlite3"],
+  DynamoDB: ["@aws-sdk/client-dynamodb"],
+  Elasticsearch: ["@elastic/elasticsearch"]
 };
 
 const TEST_FRAMEWORK_INDICATORS: Record<string, string[]> = {
-  "Jest": ["jest", "@jest/core"],
-  "Vitest": ["vitest"],
-  "Mocha": ["mocha"],
-  "Pytest": ["pytest"],
-  "JUnit": ["junit"],
-  "Playwright": ["@playwright/test"],
-  "Cypress": ["cypress"],
-  "Testing Library": ["@testing-library/react", "@testing-library/jest-dom"],
+  Jest: ["jest", "@jest/core"],
+  Vitest: ["vitest"],
+  Mocha: ["mocha"],
+  Pytest: ["pytest"],
+  JUnit: ["junit"],
+  Playwright: ["@playwright/test"],
+  Cypress: ["cypress"],
+  "Testing Library": ["@testing-library/react", "@testing-library/jest-dom"]
 };
 
 const CI_CD_FILES: Record<string, string> = {
   ".github/workflows": "GitHub Actions",
   ".gitlab-ci.yml": "GitLab CI",
-  "Jenkinsfile": "Jenkins",
+  Jenkinsfile: "Jenkins",
   ".circleci": "CircleCI",
   ".travis.yml": "Travis CI",
   "azure-pipelines.yml": "Azure DevOps",
   "bitbucket-pipelines.yml": "Bitbucket Pipelines",
-  "Dockerfile": "Docker",
+  Dockerfile: "Docker",
   "docker-compose.yml": "Docker Compose",
   "docker-compose.yaml": "Docker Compose",
-  "k8s": "Kubernetes",
-  "kubernetes": "Kubernetes",
-  "helm": "Helm",
+  k8s: "Kubernetes",
+  kubernetes: "Kubernetes",
+  helm: "Helm"
 };
 
 const LINTER_FILES: Record<string, string> = {
-  ".eslintrc": "ESLint", ".eslintrc.js": "ESLint", ".eslintrc.json": "ESLint", ".eslintrc.yml": "ESLint", "eslint.config.js": "ESLint", "eslint.config.mjs": "ESLint",
-  ".prettierrc": "Prettier", ".prettierrc.js": "Prettier", ".prettierrc.json": "Prettier",
+  ".eslintrc": "ESLint",
+  ".eslintrc.js": "ESLint",
+  ".eslintrc.json": "ESLint",
+  ".eslintrc.yml": "ESLint",
+  "eslint.config.js": "ESLint",
+  "eslint.config.mjs": "ESLint",
+  ".prettierrc": "Prettier",
+  ".prettierrc.js": "Prettier",
+  ".prettierrc.json": "Prettier",
   ".stylelintrc": "Stylelint",
   "biome.json": "Biome",
   ".rubocop.yml": "RuboCop",
-  "pylintrc": "Pylint", ".pylintrc": "Pylint",
-  "ruff.toml": "Ruff", ".ruff.toml": "Ruff",
+  pylintrc: "Pylint",
+  ".pylintrc": "Pylint",
+  "ruff.toml": "Ruff",
+  ".ruff.toml": "Ruff"
 };
 
 // ─── Recursive file scanner ─────────────────────────────────────────────────
 
 const IGNORE_DIRS = new Set([
-  "node_modules", ".git", ".next", ".nuxt", "__pycache__", ".venv", "venv",
-  "dist", "build", "out", ".cache", "coverage", ".turbo", ".nx",
-  "vendor", "target", "bin", "obj", ".gradle",
+  "node_modules",
+  ".git",
+  ".next",
+  ".nuxt",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  "out",
+  ".cache",
+  "coverage",
+  ".turbo",
+  ".nx",
+  "vendor",
+  "target",
+  "bin",
+  "obj",
+  ".gradle"
 ]);
 
-function scanFiles(dir: string, basePath: string, files: FileEntry[], depth = 0): void {
+function scanFiles(
+  dir: string,
+  basePath: string,
+  files: FileEntry[],
+  depth = 0
+): void {
   if (depth > 8) return;
 
   let entries: fs.Dirent[];
@@ -140,7 +183,8 @@ function scanFiles(dir: string, basePath: string, files: FileEntry[], depth = 0)
   }
 
   for (const entry of entries) {
-    if (entry.name.startsWith(".") && depth === 0 && entry.isDirectory()) continue;
+    if (entry.name.startsWith(".") && depth === 0 && entry.isDirectory())
+      continue;
     if (IGNORE_DIRS.has(entry.name)) continue;
 
     const fullPath = path.join(dir, entry.name);
@@ -159,7 +203,7 @@ function scanFiles(dir: string, basePath: string, files: FileEntry[], depth = 0)
             path: relativePath,
             extension: ext,
             sizeBytes: stat.size,
-            language,
+            language
           });
         }
       } catch {
@@ -171,12 +215,15 @@ function scanFiles(dir: string, basePath: string, files: FileEntry[], depth = 0)
 
 // ─── Dependency file readers ─────────────────────────────────────────────────
 
-function readJsonDeps(filePath: string): { deps: Record<string, string>; devDeps: Record<string, string> } {
+function readJsonDeps(filePath: string): {
+  deps: Record<string, string>;
+  devDeps: Record<string, string>;
+} {
   try {
     const content = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     return {
       deps: content.dependencies || {},
-      devDeps: content.devDependencies || {},
+      devDeps: content.devDependencies || {}
     };
   } catch {
     return { deps: {}, devDeps: {} };
@@ -185,7 +232,11 @@ function readJsonDeps(filePath: string): { deps: Record<string, string>; devDeps
 
 function readPythonDeps(repoPath: string): Record<string, string> {
   const deps: Record<string, string> = {};
-  const reqFiles = ["requirements.txt", "requirements-dev.txt", "requirements/base.txt"];
+  const reqFiles = [
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements/base.txt"
+  ];
 
   for (const f of reqFiles) {
     const fp = path.join(repoPath, f);
@@ -209,7 +260,10 @@ function readPythonDeps(repoPath: string): Record<string, string> {
     if (depMatch) {
       const items = depMatch[1].match(/"([^"]+)"/g);
       items?.forEach((item) => {
-        const name = item.replace(/"/g, "").split(/[>=<~!]/)[0].trim();
+        const name = item
+          .replace(/"/g, "")
+          .split(/[>=<~!]/)[0]
+          .trim();
         deps[name] = "*";
       });
     }
@@ -223,17 +277,33 @@ function readPythonDeps(repoPath: string): Record<string, string> {
 function detectEntryPoints(repoPath: string, files: FileEntry[]): string[] {
   const entryPoints: string[] = [];
   const candidates = [
-    "src/main.ts", "src/index.ts", "src/app.ts", "src/server.ts",
-    "src/main.js", "src/index.js", "src/app.js", "src/server.js",
-    "main.py", "app.py", "manage.py", "wsgi.py",
-    "main.go", "cmd/main.go",
-    "src/main.rs", "src/lib.rs",
-    "Main.java", "Application.java",
-    "index.html",
+    "src/main.ts",
+    "src/index.ts",
+    "src/app.ts",
+    "src/server.ts",
+    "src/main.js",
+    "src/index.js",
+    "src/app.js",
+    "src/server.js",
+    "main.py",
+    "app.py",
+    "manage.py",
+    "wsgi.py",
+    "main.go",
+    "cmd/main.go",
+    "src/main.rs",
+    "src/lib.rs",
+    "Main.java",
+    "Application.java",
+    "index.html"
   ];
 
   for (const candidate of candidates) {
-    if (files.some((f) => f.path === candidate || f.path.endsWith(`/${candidate}`))) {
+    if (
+      files.some(
+        (f) => f.path === candidate || f.path.endsWith(`/${candidate}`)
+      )
+    ) {
       entryPoints.push(candidate);
     }
   }
@@ -246,9 +316,12 @@ function detectEntryPoints(repoPath: string, files: FileEntry[]): string[] {
       if (pkg.main) entryPoints.push(pkg.main);
       if (pkg.bin) {
         if (typeof pkg.bin === "string") entryPoints.push(pkg.bin);
-        else Object.values(pkg.bin).forEach((v) => entryPoints.push(v as string));
+        else
+          Object.values(pkg.bin).forEach((v) => entryPoints.push(v as string));
       }
-    } catch { /* skip */ }
+    } catch {
+      /* skip */
+    }
   }
 
   return [...new Set(entryPoints)];
@@ -256,14 +329,25 @@ function detectEntryPoints(repoPath: string, files: FileEntry[]): string[] {
 
 // ─── Detect architecture pattern ─────────────────────────────────────────────
 
-function detectArchitecture(repoPath: string, files: FileEntry[], frameworks: string[]): string {
+function detectArchitecture(
+  repoPath: string,
+  files: FileEntry[],
+  frameworks: string[]
+): string {
   const paths = files.map((f) => f.path);
-  const hasDir = (name: string) => paths.some((p) => p.includes(`/${name}/`) || p.startsWith(`${name}/`));
+  const hasDir = (name: string) =>
+    paths.some((p) => p.includes(`/${name}/`) || p.startsWith(`${name}/`));
 
-  if (fs.existsSync(path.join(repoPath, "nx.json")) || fs.existsSync(path.join(repoPath, "lerna.json"))) {
+  if (
+    fs.existsSync(path.join(repoPath, "nx.json")) ||
+    fs.existsSync(path.join(repoPath, "lerna.json"))
+  ) {
     return "Monorepo (Nx/Lerna)";
   }
-  if (fs.existsSync(path.join(repoPath, "turbo.json")) || fs.existsSync(path.join(repoPath, "pnpm-workspace.yaml"))) {
+  if (
+    fs.existsSync(path.join(repoPath, "turbo.json")) ||
+    fs.existsSync(path.join(repoPath, "pnpm-workspace.yaml"))
+  ) {
     return "Monorepo (Turborepo)";
   }
   if (hasDir("controllers") && hasDir("services") && hasDir("models")) {
@@ -283,7 +367,10 @@ function detectArchitecture(repoPath: string, files: FileEntry[], frameworks: st
       return "Full-Stack SSR Framework";
     }
   }
-  if (hasDir("components") && (frameworks.includes("React") || frameworks.includes("Vue.js"))) {
+  if (
+    hasDir("components") &&
+    (frameworks.includes("React") || frameworks.includes("Vue.js"))
+  ) {
     return "SPA (Single Page Application)";
   }
   if (hasDir("handlers") && hasDir("functions")) {
@@ -309,12 +396,13 @@ export function detectTechProfile(repoPath: string): TechProfile {
       langCounts[f.language] = (langCounts[f.language] || 0) + 1;
     }
   }
-  const totalCodeFiles = Object.values(langCounts).reduce((a, b) => a + b, 0) || 1;
+  const totalCodeFiles =
+    Object.values(langCounts).reduce((a, b) => a + b, 0) || 1;
   const languages = Object.entries(langCounts)
     .map(([name, count]) => ({
       name,
       percentage: Math.round((count / totalCodeFiles) * 100),
-      fileCount: count,
+      fileCount: count
     }))
     .sort((a, b) => b.fileCount - a.fileCount);
 
@@ -328,14 +416,22 @@ export function detectTechProfile(repoPath: string): TechProfile {
     const result = readJsonDeps(pkgJsonPath);
     deps = result.deps;
     devDeps = result.devDeps;
-    packageManager = fs.existsSync(path.join(repoPath, "pnpm-lock.yaml")) ? "pnpm"
-      : fs.existsSync(path.join(repoPath, "yarn.lock")) ? "yarn"
-      : fs.existsSync(path.join(repoPath, "bun.lockb")) ? "bun"
+    packageManager = fs.existsSync(path.join(repoPath, "pnpm-lock.yaml"))
+      ? "pnpm"
+      : fs.existsSync(path.join(repoPath, "yarn.lock"))
+      ? "yarn"
+      : fs.existsSync(path.join(repoPath, "bun.lockb"))
+      ? "bun"
       : "npm";
-  } else if (fs.existsSync(path.join(repoPath, "requirements.txt")) || fs.existsSync(path.join(repoPath, "pyproject.toml"))) {
+  } else if (
+    fs.existsSync(path.join(repoPath, "requirements.txt")) ||
+    fs.existsSync(path.join(repoPath, "pyproject.toml"))
+  ) {
     deps = readPythonDeps(repoPath);
-    packageManager = fs.existsSync(path.join(repoPath, "Pipfile")) ? "pipenv"
-      : fs.existsSync(path.join(repoPath, "poetry.lock")) ? "poetry"
+    packageManager = fs.existsSync(path.join(repoPath, "Pipfile"))
+      ? "pipenv"
+      : fs.existsSync(path.join(repoPath, "poetry.lock"))
+      ? "poetry"
       : "pip";
   } else if (fs.existsSync(path.join(repoPath, "go.mod"))) {
     packageManager = "go modules";
@@ -345,7 +441,10 @@ export function detectTechProfile(repoPath: string): TechProfile {
     packageManager = "bundler";
   } else if (fs.existsSync(path.join(repoPath, "pom.xml"))) {
     packageManager = "maven";
-  } else if (fs.existsSync(path.join(repoPath, "build.gradle")) || fs.existsSync(path.join(repoPath, "build.gradle.kts"))) {
+  } else if (
+    fs.existsSync(path.join(repoPath, "build.gradle")) ||
+    fs.existsSync(path.join(repoPath, "build.gradle.kts"))
+  ) {
     packageManager = "gradle";
   }
 
@@ -377,13 +476,28 @@ export function detectTechProfile(repoPath: string): TechProfile {
 
   // Step 7: Detect build tools
   const buildTools: string[] = [];
-  if (fs.existsSync(path.join(repoPath, "webpack.config.js")) || fs.existsSync(path.join(repoPath, "webpack.config.ts"))) buildTools.push("Webpack");
-  if (fs.existsSync(path.join(repoPath, "vite.config.ts")) || fs.existsSync(path.join(repoPath, "vite.config.js"))) buildTools.push("Vite");
-  if (fs.existsSync(path.join(repoPath, "rollup.config.js"))) buildTools.push("Rollup");
-  if (fs.existsSync(path.join(repoPath, "esbuild.config.js")) || "esbuild" in allDeps) buildTools.push("esbuild");
-  if (fs.existsSync(path.join(repoPath, "tsconfig.json"))) buildTools.push("TypeScript Compiler");
+  if (
+    fs.existsSync(path.join(repoPath, "webpack.config.js")) ||
+    fs.existsSync(path.join(repoPath, "webpack.config.ts"))
+  )
+    buildTools.push("Webpack");
+  if (
+    fs.existsSync(path.join(repoPath, "vite.config.ts")) ||
+    fs.existsSync(path.join(repoPath, "vite.config.js"))
+  )
+    buildTools.push("Vite");
+  if (fs.existsSync(path.join(repoPath, "rollup.config.js")))
+    buildTools.push("Rollup");
+  if (
+    fs.existsSync(path.join(repoPath, "esbuild.config.js")) ||
+    "esbuild" in allDeps
+  )
+    buildTools.push("esbuild");
+  if (fs.existsSync(path.join(repoPath, "tsconfig.json")))
+    buildTools.push("TypeScript Compiler");
   if (fs.existsSync(path.join(repoPath, "nx.json"))) buildTools.push("Nx");
-  if (fs.existsSync(path.join(repoPath, "turbo.json"))) buildTools.push("Turborepo");
+  if (fs.existsSync(path.join(repoPath, "turbo.json")))
+    buildTools.push("Turborepo");
   if (fs.existsSync(path.join(repoPath, "Makefile"))) buildTools.push("Make");
 
   // Step 8: Detect CI/CD
@@ -409,7 +523,10 @@ export function detectTechProfile(repoPath: string): TechProfile {
   const entryPoints = detectEntryPoints(repoPath, files);
 
   // Estimate total lines
-  const totalLinesEstimate = files.reduce((sum, f) => sum + Math.ceil(f.sizeBytes / 40), 0);
+  const totalLinesEstimate = files.reduce(
+    (sum, f) => sum + Math.ceil(f.sizeBytes / 40),
+    0
+  );
 
   const profile: TechProfile = {
     languages,
@@ -425,14 +542,14 @@ export function detectTechProfile(repoPath: string): TechProfile {
     totalFiles: files.length,
     totalLinesEstimate,
     dependencies: deps,
-    devDependencies: devDeps,
+    devDependencies: devDeps
   };
 
   log.info("Tech profile detected", {
     languages: languages.map((l) => l.name).join(", "),
     frameworks: frameworks.join(", ") || "none",
     architecture,
-    files: files.length,
+    files: files.length
   });
 
   return profile;
@@ -454,7 +571,9 @@ export function getFileTree(repoPath: string, maxDepth = 3): string {
       return;
     }
 
-    entries = entries.filter((e) => !IGNORE_DIRS.has(e.name) && !e.name.startsWith("."));
+    entries = entries.filter(
+      (e) => !IGNORE_DIRS.has(e.name) && !e.name.startsWith(".")
+    );
     entries.sort((a, b) => {
       if (a.isDirectory() && !b.isDirectory()) return -1;
       if (!a.isDirectory() && b.isDirectory()) return 1;
@@ -483,7 +602,10 @@ export function getFileTree(repoPath: string, maxDepth = 3): string {
 /**
  * Read a file from the repo (with size limit).
  */
-export function readRepoFile(repoPath: string, filePath: string): string | null {
+export function readRepoFile(
+  repoPath: string,
+  filePath: string
+): string | null {
   const fullPath = path.join(repoPath, filePath);
   try {
     const stat = fs.statSync(fullPath);
