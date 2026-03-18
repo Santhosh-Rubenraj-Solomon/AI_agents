@@ -1,0 +1,244 @@
+/**
+ * services/summaryService.ts — Markdown generation + Slack posting.
+ *
+ * Generates two types of documents:
+ * 1. Plan .md — posted before execution approval
+ * 2. Final summary .md — posted after pipeline completes
+ *
+ * Documents are saved to the worktree and previewed in the Slack thread.
+ */
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { WebClient } from "@slack/web-api";
+import { CONFIG } from "../config.js";
+import { getTypeLabel } from "../schemas.js";
+import { getScopedDiffStat } from "./gitService.js";
+import { uploadMdToSlack } from "../utils/slackFileUpload.js";
+import type {
+  PipelineState,
+  FullTaskRequest,
+  TaskAnalysis,
+  SayFn,
+} from "../types.js";
+
+// ─── Plan document ────────────────────────────────────────────────────────────
+
+/**
+ * Generate the execution plan markdown, posted BEFORE approval.
+ */
+export function generatePlanMd(
+  taskId: string,
+  request: FullTaskRequest,
+  analysis: TaskAnalysis
+): string {
+  return `# Execution Plan -- ${taskId}
+
+## Request
+
+| Field | Value |
+|-------|-------|
+| **Type** | ${request.type} |
+| **Title** | ${request.title} |
+| **Priority** | ${request.priority} |
+| **Service** | ${CONFIG.service.name} |
+
+## Description
+
+${request.description || request.title}
+
+## Thought Process
+
+${analysis.reasoning}
+
+## Step-by-Step Approach
+
+${analysis.approach.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+
+## Files to Modify
+
+${analysis.filesToChange.map((f) => `- \`${f}\``).join("\n") || "None"}
+
+## Files to Create
+
+${analysis.filesToCreate.length ? analysis.filesToCreate.map((f) => `- \`${f}\``).join("\n") : "None"}
+
+## Affected Services
+
+${analysis.affectedServices.length ? analysis.affectedServices.join(", ") : "None -- change is isolated"}
+
+## What Will Change
+
+${analysis.proposedChanges}
+
+## Risks
+
+${analysis.risks.length ? analysis.risks.map((r) => `- ${r}`).join("\n") : "None identified"}
+
+## Branch
+
+\`${analysis.branchName}\`
+
+## Complexity
+
+${analysis.estimatedComplexity}
+${analysis.needsLibChanges ? "\n> **Shared library changes may be needed (manual).**\n" : ""}
+---
+*ECR Dev Factory*`;
+}
+
+// ─── Final summary document ───────────────────────────────────────────────────
+
+/**
+ * Generate the final execution summary, posted AFTER pipeline completes.
+ */
+export async function generateFinalSummaryMd(
+  state: PipelineState
+): Promise<string> {
+  const { request, analysis, branchName, commitHash, reviewIterations, mrUrl } =
+    state;
+  const lastReview = reviewIterations[reviewIterations.length - 1];
+
+  let diffStat = "";
+  if (state.worktreePath) {
+    try {
+      diffStat = await getScopedDiffStat(state.worktreePath);
+    } catch {
+      diffStat = "(not available)";
+    }
+  }
+
+  return `# Execution Summary -- ${state.taskId}
+
+## Result: Complete
+
+| Field | Value |
+|-------|-------|
+| **Task** | ${request.title} |
+| **Type** | ${request.type} |
+| **Service** | ${CONFIG.service.name} |
+| **Branch** | \`${branchName}\` |
+| **Commit** | \`${commitHash}\` |
+| **Merge Request** | ${mrUrl} |
+| **Last Review Clean** | ${lastReview ? (lastReview.hasIssues ? "No" : "Yes") : "N/A"} |
+| **Review Iterations** | ${reviewIterations.length} |
+
+## What Was Done
+
+${analysis?.proposedChanges ?? "N/A"}
+
+## Files Changed
+
+${analysis?.filesToChange.map((f) => `- \`${f}\``).join("\n") ?? "N/A"}
+
+${
+  analysis?.filesToCreate.length
+    ? `## Files Created\n\n${analysis.filesToCreate.map((f) => `- \`${f}\``).join("\n")}`
+    : ""
+}
+
+## Diff Stats
+
+\`\`\`
+${diffStat}
+\`\`\`
+
+## Review History
+
+${reviewIterations
+  .map(
+    (r, i) =>
+      `### Iteration ${i + 1}\n` +
+      `- **Has Issues:** ${r.hasIssues ? "Yes" : "No"}\n` +
+      `- **Review File:** \`${r.mdPath}\`\n` +
+      `- **Feedback Preview:** ${r.content.slice(0, 500)}${r.content.length > 500 ? "..." : ""}`
+  )
+  .join("\n\n")}
+
+## Merge Request
+
+${mrUrl ?? "N/A"}
+
+---
+*ECR Dev Factory -- ${new Date().toISOString()}*`;
+}
+
+// ─── MR description builder ──────────────────────────────────────────────────
+
+/**
+ * Build a GitLab MR description from pipeline state.
+ */
+export function buildMrDescription(state: PipelineState): string {
+  const a = state.analysis;
+  const lastReview = state.reviewIterations[state.reviewIterations.length - 1];
+
+  if (!a) return state.request.description || state.request.title;
+
+  return [
+    `## ${getTypeLabel(state.request.type)}: ${state.request.title}`,
+    "",
+    "### Description",
+    state.request.description,
+    "",
+    "### Approach",
+    a.reasoning,
+    "",
+    "### Files Changed",
+    ...a.filesToChange.map((f) => `- \`${f}\``),
+    ...(a.filesToCreate.length
+      ? ["", "### Files Created", ...a.filesToCreate.map((f) => `- \`${f}\``)]
+      : []),
+    "",
+    "### Review",
+    `- Clean: ${lastReview ? (lastReview.hasIssues ? "No" : "Yes") : "N/A"}`,
+    `- Iterations: ${state.reviewIterations.length}`,
+    "",
+    "---",
+    "*Generated by ECR Dev Factory*",
+  ].join("\n");
+}
+
+// ─── Slack posting ────────────────────────────────────────────────────────────
+
+/**
+ * Post a markdown document to the Slack thread as a downloadable .md file,
+ * and optionally save it to the worktree.
+ *
+ * @param client   - Slack WebClient (from app.client) for file uploads
+ * @param channelId - The channel to post in
+ * @param threadTs  - Thread timestamp for threading
+ * @param title     - Document title (used for filename and context message)
+ * @param markdown  - The full markdown content
+ * @param taskId    - Task ID used to build a descriptive filename
+ * @param savePath  - Optional worktree path to save a copy to disk
+ */
+export async function postMdToThread(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  title: string,
+  markdown: string,
+  taskId: string,
+  savePath?: string,
+): Promise<void> {
+  // Build a descriptive filename from the title and task ID
+  const slug = title.toLowerCase().replace(/\s+/g, "-");
+  const filename = `${slug}-${taskId}.md`;
+
+  // Save to disk if a path is provided
+  if (savePath) {
+    const dir = path.join(savePath, ".ecr-factory");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, filename), markdown, "utf-8");
+  }
+
+  // Upload as a .md file to the Slack thread
+  await uploadMdToSlack(
+    client,
+    channelId,
+    threadTs,
+    filename,
+    markdown,
+    `*${title}* -- Task \`${taskId}\``,
+  );
+}

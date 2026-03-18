@@ -1,0 +1,195 @@
+/**
+ * agents/summaryWriter.ts — Summary Writer agent.
+ *
+ * Generates a human-friendly MR summary document after the pipeline
+ * completes (MR created). The summary is designed to be understandable
+ * by anyone — including non-technical readers who do not know the service.
+ *
+ * The summary includes:
+ *   1. Title & overview
+ *   2. Background (why the change was needed)
+ *   3. What changed (plain English, no jargon)
+ *   4. Flow diagram (Mermaid — readable as text, renders in GitLab/GitHub)
+ *   5. Files modified with descriptions
+ *   6. Impact on users/systems
+ *   7. Review summary (iterations, issues found/fixed)
+ *   8. Testing results
+ *   9. Merge request link
+ *
+ * Uses Claude CLI (via generateSummary) in read-only mode.
+ * Saves the .md to the worktree and returns the content for Slack upload.
+ */
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import { CONFIG } from "../config.js";
+import { generateSummary } from "../services/claudeAgent.js";
+import { getScopedDiffStat } from "../services/gitService.js";
+import { getTask } from "../state/store.js";
+import { getTypeLabel } from "../schemas.js";
+import { createLogger } from "../utils/logger.js";
+import type {
+  AgentInterface,
+  SummaryWriterInput,
+  SummaryWriterOutput,
+} from "./types.js";
+
+const log = createLogger("SummaryWriter");
+
+// ─── Summary Writer Agent ────────────────────────────────────────────────────
+
+export const summaryWriterAgent: AgentInterface<SummaryWriterInput, SummaryWriterOutput> = {
+  name: "SummaryWriter",
+  activePhase: "complete",
+
+  async run(input: SummaryWriterInput): Promise<SummaryWriterOutput> {
+    const state = getTask(input.taskId);
+    if (!state) {
+      return {
+        success: false,
+        message: `Task ${input.taskId} not found.`,
+        error: "TASK_NOT_FOUND",
+        mdPath: null,
+        content: null,
+      };
+    }
+
+    log.info("Generating MR summary", { taskId: input.taskId });
+
+    try {
+      // Gather context for the prompt
+      const { request, analysis, reviewIterations, mrUrl, branchName, commitHash } = state;
+      const typeLabel = getTypeLabel(request.type);
+
+      // Try to get diff stats (may fail if worktree is cleaned up)
+      let diffStat = "(not available — worktree cleaned up)";
+      if (state.worktreePath) {
+        try {
+          diffStat = await getScopedDiffStat(state.worktreePath);
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      // Build review history context
+      const reviewHistory = reviewIterations
+        .map((r, i) => {
+          const preview = r.content.slice(0, 1500);
+          return (
+            `### Iteration ${i + 1}\n` +
+            `- Has Issues: ${r.hasIssues ? "Yes" : "No"}\n` +
+            `- Feedback Preview:\n${preview}`
+          );
+        })
+        .join("\n\n");
+
+      // Build files context
+      const filesChanged = analysis?.filesToChange.join("\n") ?? "N/A";
+      const filesCreated = analysis?.filesToCreate.join("\n") ?? "None";
+
+      const prompt = `You are a technical writer creating a summary document for a merge request.
+
+IMPORTANT RULES:
+- Write for a mixed audience: developers AND non-technical stakeholders
+- Use plain English where possible — explain technical changes simply
+- Include a Mermaid flow diagram showing how the change affects the system
+- Maximum 300 lines
+- Use a friendly, professional tone
+- Output ONLY the markdown document, no code fences wrapping it
+
+TASK DETAILS:
+- Type: ${typeLabel}
+- Title: ${request.title}
+- Description: ${request.description || request.title}
+- Priority: ${request.priority}
+- Service: ${CONFIG.service.name} (+ ${CONFIG.allowedServicePaths.filter(p => p !== CONFIG.service.path).join(", ") || "none"})
+- Branch: ${branchName}
+- Commit: ${commitHash}
+
+ANALYSIS:
+${analysis?.reasoning ?? "N/A"}
+
+APPROACH:
+${analysis?.approach.map((s, i) => `${i + 1}. ${s}`).join("\n") ?? "N/A"}
+
+PROPOSED CHANGES:
+${analysis?.proposedChanges ?? "N/A"}
+
+FILES CHANGED:
+${filesChanged}
+
+FILES CREATED:
+${filesCreated}
+
+DIFF STATS:
+${diffStat}
+
+REVIEW HISTORY (${reviewIterations.length} iteration(s)):
+${reviewHistory || "No review iterations recorded."}
+
+MERGE REQUEST URL:
+${mrUrl ?? "N/A"}
+
+RISKS:
+${analysis?.risks.join("\n") ?? "None identified"}
+
+Now generate the summary document with these sections:
+
+1. **Title & Overview** — what was done in 1-2 sentences
+2. **Background** — why this change was needed (from the task request)
+3. **What Changed** — plain English explanation, no jargon
+4. **Flow Diagram** — a Mermaid diagram showing how the change affects the system (request flow, data flow, or architecture). Use \`\`\`mermaid code block.
+5. **Files Modified** — list with brief description of what changed in each file
+6. **Impact** — what users/systems are affected
+7. **Review Summary** — how many iterations, what issues were found and fixed
+8. **Testing** — what was tested (lint, unit tests, review passes)
+9. **Merge Request Link**
+
+End with a footer: *Generated by ECR Dev Factory*`;
+
+      const content = await generateSummary(prompt, CONFIG.repo.root);
+
+      // Save to worktree if available
+      let mdPath: string | null = null;
+      if (state.worktreePath) {
+        try {
+          const dir = path.join(state.worktreePath, ".ecr-factory");
+          await fs.mkdir(dir, { recursive: true });
+          const filename = `merge-request-summary-${input.taskId}.md`;
+          mdPath = path.join(dir, filename);
+          await fs.writeFile(mdPath, content, "utf-8");
+          log.info("Summary saved to worktree", { taskId: input.taskId, mdPath });
+        } catch {
+          // Non-fatal — worktree may already be cleaned up
+          log.warn("Could not save summary to worktree", { taskId: input.taskId });
+        }
+      }
+
+      log.info("Summary generated successfully", {
+        taskId: input.taskId,
+        contentLength: content.length,
+      });
+
+      return {
+        success: true,
+        message: "MR summary generated successfully.",
+        mdPath,
+        content,
+      };
+    } catch (err: unknown) {
+      const error = err as Error;
+      log.error("Summary generation failed", {
+        taskId: input.taskId,
+        error: error.message,
+      });
+
+      return {
+        success: false,
+        message: `Summary generation failed: ${error.message}`,
+        error: error.message,
+        mdPath: null,
+        content: null,
+      };
+    }
+  },
+};
