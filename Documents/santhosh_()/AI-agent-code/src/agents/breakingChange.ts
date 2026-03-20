@@ -17,9 +17,9 @@ import { createLogger } from "../utils/logger.js";
 import {
   parseAIJson,
   BreakingChangeResultSchema,
-  TechProfile,
-  BreakingChangeResult,
-  AgentResult
+  type TechProfile,
+  type BreakingChangeResult,
+  type AgentResult
 } from "../schemas.js";
 
 const log = createLogger("BreakingChange");
