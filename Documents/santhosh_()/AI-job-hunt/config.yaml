@@ -1,0 +1,54 @@
+user_profile:
+  name: "Your Full Name"
+  email: "you@email.com"
+  phone: "+91-XXXXXXXXXX"
+  location: "Chennai, Tamil Nadu, India"
+  linkedin_url: "https://linkedin.com/in/yourhandle"
+  portfolio_url: ""
+  notice_period: "Immediate"
+  expected_salary: "XX LPA"
+  willing_to_relocate: true
+  preferred_work_mode: "Hybrid" # Remote / On-site / Hybrid
+
+target_roles:
+  - "Software Engineer"
+  - "Backend Developer"
+  - "Full Stack Developer"
+
+target_companies: [] # leave empty to search broadly
+
+excluded_companies:
+  - "Company A"
+  - "Company B"
+
+preferred_locations:
+  - "Chennai"
+  - "Bengaluru"
+  - "Remote"
+
+minimum_match_score: 70 # 0-100; skip jobs below this threshold
+
+portals_to_use:
+  - linkedin
+  - naukri
+  - indeed
+  - wellfound
+
+base_resume_path: "./resume/base_resume.pdf"
+
+agent_settings:
+  max_daily_applications: 15
+  auto_submit: false # MUST be false — human approval required
+  retry_limit: 3
+  retry_delay_seconds: 5
+  discovery_result_limit: 10
+  model: "gemini-2.0-flash"
+  notification_channel: "email" # email | slack | whatsapp
+
+schedule:
+  discovery_time: "08:00"
+  tailoring_time: "08:30"
+  notification_time: "09:00"
+  submission_time: "12:00"
+  report_time: "18:00"
+  timezone: "Asia/Kolkata"
