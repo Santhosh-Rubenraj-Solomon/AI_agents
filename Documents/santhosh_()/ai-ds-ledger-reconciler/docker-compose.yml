@@ -1,0 +1,77 @@
+# =============================================================================
+#  AI-DS Ledger Reconciler — Distributed Cluster
+# =============================================================================
+#  Topology:
+#    client --> nginx (:8080, round-robin LB) --> agent-app x N (:3000 internal)
+#                                                       |
+#                                            +----------+----------+
+#                                            |                     |
+#                                          redis              postgres
+#                                  (distributed lock)    (durable ledger - optional)
+#
+#  IMPORTANT: `agent-app` intentionally has NO `container_name` and publishes NO
+#  host port. That is what allows `docker compose up --scale agent-app=3` to spin
+#  up 3 identical replicas behind nginx. Docker's embedded DNS (127.0.0.11)
+#  resolves `agent-app` to all replica IPs; nginx round-robins across them.
+# =============================================================================
+version: "3.9"
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: ledger-nginx
+    ports:
+      - "8080:80"           # public entrypoint
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - agent-app
+    networks:
+      - ledger-net
+
+  agent-app:
+    build:
+      context: ./agent-app
+      dockerfile: Dockerfile
+    # NO container_name + NO host port mapping => `--scale agent-app=3` works.
+    expose:
+      - "3000"
+    environment:
+      - PORT=3000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=postgres://ledger:ledger@postgres:5432/ledger
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - ledger-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ledger-redis
+    ports:
+      - "6379:6379"         # exposed for local inspection (redis-cli)
+    networks:
+      - ledger-net
+
+  # Postgres is included to complete the architecture. The prototype's ledger
+  # runs in-memory (LedgerService) so the cluster is runnable with zero schema
+  # setup; swapping LedgerService for a TypeORM/Prisma repo against this DB is
+  # the natural production next step.
+  postgres:
+    image: postgres:16-alpine
+    container_name: ledger-postgres
+    environment:
+      - POSTGRES_USER=ledger
+      - POSTGRES_PASSWORD=ledger
+      - POSTGRES_DB=ledger
+    ports:
+      - "5432:5432"
+    networks:
+      - ledger-net
+
+networks:
+  ledger-net:
+    driver: bridge
