@@ -13,6 +13,7 @@ from src.models import (
 )
 from src.memory import save_job, job_exists
 from src.tools.web_search import build_search_queries
+from src.tools.adzuna import search_adzuna, adzuna_configured
 
 # ── Scoring ───────────────────────────────────────────────────────────────
 
@@ -144,68 +145,77 @@ async def parse_search_results_with_llm(
 async def run_discovery(
     config: AppConfig,
     resume_skills: Optional[list[str]] = None,
+    role: Optional[str] = None,
+    location: Optional[str] = None,
+    work_type: Optional[str] = None,
 ) -> list[Job]:
     """Execute the full job discovery phase.
 
-    1. Build search queries for all (role, location, portal) combos
-    2. Run web searches
-    3. Parse results with LLM
-    4. Score and filter
-    5. Save to DB and return ranked list
+    Uses the Adzuna API when credentials are configured (real structured jobs,
+    no LLM needed to parse); otherwise falls back to DuckDuckGo + LLM parsing.
+    Optional role/location/work_type narrow the search (from the UI filters).
     """
-    from duckduckgo_search import DDGS
-
     if resume_skills is None:
         resume_skills = []
+
+    if adzuna_configured():
+        candidates = await search_adzuna(
+            config, resume_skills, role=role, location=location, work_type=work_type,
+        )
+        # Adzuna descriptions are short snippets, so keyword-in-JD scoring runs
+        # lower than curated data — use a gentler floor and let ranking surface
+        # the best matches.
+        floor = min(config.minimum_match_score, 45)
+    else:
+        candidates = await _discover_via_duckduckgo(config)
+        floor = config.minimum_match_score
+
+    all_jobs: list[Job] = []
+    seen_ids: set[str] = set()
+
+    for job in candidates:
+        if job.job_id in seen_ids:
+            continue
+        if job_exists(job.job_id):
+            seen_ids.add(job.job_id)
+            continue
+        if job.company_name in config.excluded_companies:
+            continue
+
+        job.match_score = compute_match_score(job, config, resume_skills).total
+        if job.match_score < floor:
+            continue
+
+        seen_ids.add(job.job_id)
+        all_jobs.append(job)
+
+    all_jobs.sort(key=lambda j: j.match_score, reverse=True)
+    top_jobs = all_jobs[: config.agent_settings.discovery_result_limit]
+
+    for job in top_jobs:
+        save_job(job)
+
+    return top_jobs
+
+
+async def _discover_via_duckduckgo(config: AppConfig) -> list[Job]:
+    """No-key fallback: search DuckDuckGo and parse results with the LLM."""
+    from duckduckgo_search import DDGS
 
     queries = build_search_queries(
         config.target_roles,
         config.preferred_locations,
         config.portals_to_use,
     )
-
-    all_jobs: list[Job] = []
-    seen_ids: set[str] = set()
-
+    jobs: list[Job] = []
     for q in queries:
         try:
             with DDGS() as ddgs:
                 raw = list(ddgs.text(q["query"], max_results=10))
         except Exception:
             raw = []
-
-        parsed = await parse_search_results_with_llm(raw, q["portal"], config)
-
-        for job in parsed:
-            if job.job_id in seen_ids:
-                continue
-            if job_exists(job.job_id):
-                seen_ids.add(job.job_id)
-                continue
-            if job.company_name in config.excluded_companies:
-                continue
-
-            # Score
-            breakdown = compute_match_score(job, config, resume_skills)
-            job.match_score = breakdown.total
-
-            if job.match_score < config.minimum_match_score:
-                continue
-
-            seen_ids.add(job.job_id)
-            all_jobs.append(job)
-
-    # Sort by score descending
-    all_jobs.sort(key=lambda j: j.match_score, reverse=True)
-
-    # Limit results
-    top_jobs = all_jobs[: config.agent_settings.discovery_result_limit]
-
-    # Save to DB
-    for job in top_jobs:
-        save_job(job)
-
-    return top_jobs
+        jobs.extend(await parse_search_results_with_llm(raw, q["portal"], config))
+    return jobs
 
 
 def format_discovery_table(jobs: list[Job]) -> str:

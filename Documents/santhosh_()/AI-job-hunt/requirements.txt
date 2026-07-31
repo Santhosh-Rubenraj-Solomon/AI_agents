@@ -14,3 +14,6 @@ duckduckgo-search>=6.1.0
 aiosqlite>=0.20.0
 rich>=13.7.0
 schedule>=1.2.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Job Hunt Agent</title>
+<style>
+  :root {
+    --bg: #f3f5fc; --surface: #ffffff; --ink: #171a2b; --muted: #5c6479; --faint: #9aa1b4;
+    --line: #e6e9f4; --primary: #5b53e0; --primary-d: #453cc9;
+    --ok: #12a150; --okbg: #e6f5ec; --warn: #b9770a; --warnbg: #fbefd7; --crit: #d1493f;
+    --shadow: 0 12px 34px -16px rgba(23,26,43,0.28);
+    --shadow-sm: 0 2px 6px rgba(23,26,43,0.06);
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  .stat, .job { min-width: 0; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 22px 64px; }
+  a { color: var(--primary-d); }
+
+  /* header */
+  header.top { border-bottom: 1px solid var(--line); background: rgba(255,255,255,0.86); backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 30; }
+  .top-in { max-width: 1120px; margin: 0 auto; padding: 14px 22px; display: flex; align-items: center; gap: 14px; }
+  .logo { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; color: #fff; font-size: 20px;
+    background: linear-gradient(140deg, var(--primary), #7c3aed); box-shadow: var(--shadow-sm); }
+  .top-in h1 { font-size: 1.12rem; margin: 0; letter-spacing: -0.01em; }
+  .top-in .tag { font-size: 0.78rem; color: var(--muted); }
+  .safe-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; font-size: 0.78rem; font-weight: 600;
+    color: var(--ok); background: var(--okbg); border: 1px solid #bfe6cd; padding: 6px 12px; border-radius: 999px; }
+  .safe-pill .lock { font-size: 0.85rem; }
+
+  /* hero + stats */
+  .hero { padding: 30px 0 6px; }
+  .hero .eyebrow { font-size: 0.74rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--primary-d); font-weight: 600; }
+  .hero h2 { margin: 8px 0 0; font-size: clamp(1.7rem, 3.6vw, 2.4rem); letter-spacing: -0.025em; }
+  .hero p { margin: 10px 0 0; color: var(--muted); max-width: 60ch; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-top: 24px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; padding: 16px 18px; box-shadow: var(--shadow-sm); }
+  .stat .n { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 0.74rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+  .stat.safe .n { color: var(--ok); }
+
+  /* panels grid */
+  .cols { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; margin-top: 24px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 20px; box-shadow: var(--shadow-sm); }
+  .panel h3 { margin: 0 0 3px; font-size: 1rem; }
+  .panel .hint { margin: 0 0 16px; font-size: 0.82rem; color: var(--muted); }
+
+  /* pipeline stepper */
+  .steps { display: flex; align-items: stretch; gap: 0; }
+  .step { flex: 1; text-align: center; position: relative; padding: 0 4px; }
+  .step .dot { width: 34px; height: 34px; margin: 0 auto; border-radius: 50%; display: grid; place-items: center;
+    background: #eef0f8; color: var(--muted); font-size: 15px; border: 2px solid var(--line); position: relative; z-index: 1; }
+  .step.done .dot { background: var(--okbg); color: var(--ok); border-color: #bfe6cd; }
+  .step.active .dot { background: var(--primary); color: #fff; border-color: var(--primary); box-shadow: 0 0 0 5px rgba(91,83,224,0.16); }
+  .step.locked .dot { background: #fff; color: var(--warn); border-color: var(--warnbg); border-style: dashed; }
+  .step .nm { font-size: 0.76rem; margin-top: 8px; color: var(--muted); font-weight: 500; }
+  .step.active .nm { color: var(--ink); }
+  .step::after { content: ""; position: absolute; top: 17px; left: 50%; width: 100%; height: 2px; background: var(--line); z-index: 0; }
+  .step:last-child::after { display: none; }
+  .step.done::after { background: #bfe6cd; }
+  .pipe-note { margin-top: 16px; font-size: 0.8rem; color: var(--muted); background: var(--warnbg); border: 1px solid #f0dcae; border-radius: 10px; padding: 10px 12px; }
+
+  /* safety guards */
+  .guards { display: grid; gap: 10px; }
+  .guard { display: flex; gap: 11px; align-items: flex-start; padding: 11px 12px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfe; }
+  .guard .g-ic { flex-shrink: 0; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: var(--okbg); color: var(--ok); font-size: 14px; }
+  .guard .g-t { font-size: 0.86rem; font-weight: 600; }
+  .guard .g-d { font-size: 0.78rem; color: var(--muted); margin-top: 1px; }
+  .guard code { font-family: ui-monospace, Menlo, monospace; font-size: 0.76rem; background: #eef0f8; padding: 1px 5px; border-radius: 5px; }
+
+  /* controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; align-items: center; }
+  .btn { font: inherit; font-size: 0.92rem; font-weight: 600; border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    padding: 11px 18px; border-radius: 11px; cursor: pointer; transition: transform 0.12s, box-shadow 0.2s, background 0.2s; box-shadow: var(--shadow-sm); }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:disabled { opacity: 0.55; cursor: default; transform: none; }
+  .btn.primary { background: linear-gradient(135deg, var(--primary), var(--primary-d)); color: #fff; border-color: transparent; }
+  .drop { margin-left: auto; font-size: 0.82rem; color: var(--muted); border: 1.5px dashed var(--line); border-radius: 11px; padding: 9px 16px; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+  .drop:hover { border-color: var(--primary); background: #f6f5ff; }
+  .drop.dragover { border-color: var(--primary); background: #efeeff; }
+  .runbar { min-height: 20px; margin-top: 12px; font-size: 0.85rem; color: var(--muted); }
+  .runbar .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid #d7dae7; border-top-color: var(--primary); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 7px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* jobs */
+  .jobs-head { display: flex; align-items: baseline; justify-content: space-between; margin: 30px 0 14px; }
+  .jobs-head h3 { margin: 0; font-size: 1.15rem; }
+  .jobs-head .count { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* filter bar */
+  .filterbar { display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: flex-end; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow-sm); margin-bottom: 16px; }
+  .f-field { display: flex; flex-direction: column; gap: 5px; }
+  .f-field.grow { flex: 1 1 200px; min-width: 150px; }
+  .f-field label { font-size: 0.67rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .f-field input, .f-field select { font: inherit; font-size: 0.86rem; color: var(--ink); background: #fbfcfe;
+    border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; min-width: 116px; transition: border-color 0.15s, box-shadow 0.15s; }
+  .f-field.grow input { width: 100%; min-width: 0; }
+  .f-field input:focus, .f-field select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(91,83,224,0.14); }
+  .f-field select { cursor: pointer; }
+  .f-clear { align-self: flex-end; font: inherit; font-size: 0.8rem; font-weight: 600; color: var(--muted); background: none;
+    border: 1px solid var(--line); border-radius: 9px; padding: 8px 13px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+  .f-clear:hover { color: var(--crit); border-color: #f1c7c2; }
+  .linkish { font: inherit; color: var(--primary-d); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; }
+
+  .jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+  .job { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow-sm);
+    transition: transform 0.16s, box-shadow 0.2s; opacity: 0; transform: translateY(12px); }
+  .job.in { opacity: 1; transform: none; }
+  .job:hover { transform: translateY(-4px); box-shadow: var(--shadow); }
+  .job-top { display: flex; gap: 14px; align-items: flex-start; }
+  .ring { flex-shrink: 0; }
+  .job-hd h4 { margin: 0; font-size: 1.02rem; line-height: 1.25; }
+  .job-hd .co { margin: 3px 0 0; font-size: 0.9rem; color: var(--muted); font-weight: 500; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .badge { font-size: 0.72rem; padding: 3px 9px; border-radius: 999px; background: #eef0f8; color: var(--muted); }
+  .badge.portal { color: #fff; }
+  .desc { margin: 12px 0 0; font-size: 0.84rem; color: #616a80; line-height: 1.5; }
+  .job-actions { display: flex; gap: 8px; margin-top: 14px; }
+  .job-actions a, .job-actions button { font: inherit; font-size: 0.82rem; font-weight: 600; padding: 7px 13px; border-radius: 9px; cursor: pointer; text-decoration: none; border: 1px solid var(--line); }
+  .job-actions .view { background: var(--surface); color: var(--ink); }
+  .job-actions .tailor { background: var(--okbg); color: var(--ok); border-color: #bfe6cd; }
+  .tailor-out { margin-top: 12px; }
+  .tl-row { display: grid; grid-template-columns: 118px 1fr auto; gap: 10px; align-items: center; font-size: 0.8rem; margin-top: 8px; }
+  .tl-row .tl-k { color: var(--muted); }
+  .tl-track { height: 8px; background: #eef0f8; border-radius: 999px; position: relative; overflow: hidden; }
+  .tl-before { position: absolute; left: 0; top: 0; bottom: 0; background: #f1c7c2; border-radius: 999px; }
+  .tl-after { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); border-radius: 999px; transition: width 0.7s cubic-bezier(0.22,1,0.36,1); }
+  .tl-row .tl-v { font-variant-numeric: tabular-nums; }
+  .tl-v .b { color: var(--crit); } .tl-v .a { color: var(--ok); font-weight: 600; }
+  .foot { margin-top: 30px; font-size: 0.78rem; color: var(--faint); text-align: center; }
+
+  @media (max-width: 620px) {
+    .top-in { flex-wrap: wrap; }
+    .top-in .tag { display: none; }
+    .safe-pill { margin-left: auto; }
+    .hero h2 { font-size: 1.55rem; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .steps { overflow-x: auto; padding-bottom: 4px; }
+    .controls .drop { margin-left: 0; width: 100%; text-align: center; }
+    .jobs { grid-template-columns: 1fr; }
+    .f-field { flex: 1 1 44%; }
+    .f-field input, .f-field select { width: 100%; min-width: 0; }
+    .f-clear { flex: 1 1 100%; }
+  }
+</style>
+</head>
+<body>
+  <header class="top">
+    <div class="top-in">
+      <div class="logo">🛰️</div>
+      <div>
+        <h1>AI Job Hunt Agent</h1>
+        <div class="tag">discovers roles, tailors your résumé per JD, and stages applications for your approval</div>
+      </div>
+      <span class="safe-pill" id="modePill"><span class="lock">🔒</span> Test mode · submission disabled</span>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <section class="hero">
+      <div class="eyebrow">LangGraph · Gemini · Playwright</div>
+      <h2>Your résumé, matched and tailored — never submitted without you.</h2>
+      <p>The agent searches across portals, scores each role against your skills, and rewrites your résumé per job description. It is deliberately built so it <strong>cannot apply on its own</strong>.</p>
+    </section>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="cols">
+      <div class="panel">
+        <h3>Pipeline</h3>
+        <p class="hint">Every job flows through these phases. Approval and submission are separated on purpose.</p>
+        <div class="steps" id="steps"></div>
+        <div class="pipe-note">🔒 The <b>approve → submit</b> edge is severed — the run always stops after approval. Submitting is a separate, human-triggered step.</div>
+      </div>
+
+      <div class="panel">
+        <h3>Why it can't auto-apply</h3>
+        <p class="hint">Four independent guards sit between the agent and a real application.</p>
+        <div class="guards" id="guards"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn primary" id="btn-discover">🔍 Discover jobs</button>
+      <button class="btn" id="btn-full">⚡ Run full pipeline</button>
+      <label class="drop" id="drop">
+        📎 Upload résumé (PDF / DOCX)
+        <input type="file" id="file" accept=".pdf,.docx" hidden />
+      </label>
+    </div>
+    <div class="runbar" id="runbar"></div>
+
+    <div class="jobs-head">
+      <h3>Matched roles</h3>
+      <span class="count" id="jobcount"></span>
+    </div>
+
+    <div class="filterbar" id="filterbar">
+      <div class="f-field grow">
+        <label for="f-q">Search</label>
+        <input id="f-q" type="search" placeholder="role, company, keyword…" autocomplete="off" />
+      </div>
+      <div class="f-field">
+        <label for="f-role">Role <span title="Sets what the agent searches for on the next run">🔎</span></label>
+        <select id="f-role">
+          <option value="">All roles</option>
+          <option>Backend Developer</option>
+          <option>Full Stack Developer</option>
+          <option>AI Engineer</option>
+          <option>Agent Developer</option>
+          <option>Node.js Developer</option>
+          <option>Python Developer</option>
+        </select>
+      </div>
+      <div class="f-field">
+        <label for="f-loc">Location</label>
+        <select id="f-loc">
+          <option value="">All locations</option>
+          <option>Chennai</option>
+          <option>Bengaluru</option>
+          <option>Mumbai</option>
+          <option>Delhi</option>
+          <option>Hyderabad</option>
+          <option>Pune</option>
+          <option>Remote</option>
+          <option>Singapore</option>
+          <option>London</option>
+          <option>USA</option>
+        </select>
+      </div>
+      <div class="f-field">
+        <label for="f-work">Work type</label>
+        <select id="f-work">
+          <option value="">Any type</option>
+          <option value="remote">Remote</option>
+          <option value="hybrid">Hybrid</option>
+          <option value="on-site">On-site</option>
+        </select>
+      </div>
+      <div class="f-field">
+        <label for="f-min">Min match</label>
+        <select id="f-min">
+          <option value="0">Any</option>
+          <option value="70">70+</option>
+          <option value="80">80+</option>
+          <option value="90">90+</option>
+        </select>
+      </div>
+      <div class="f-field">
+        <label for="f-src">Source</label>
+        <select id="f-src">
+          <option value="">All sources</option>
+          <option value="adzuna">Adzuna</option>
+          <option value="linkedin">LinkedIn</option>
+          <option value="naukri">Naukri</option>
+          <option value="indeed">Indeed</option>
+          <option value="wellfound">Wellfound</option>
+        </select>
+      </div>
+      <button class="f-clear" id="f-clear" type="button">Clear</button>
+    </div>
+
+    <div class="jobs" id="jobs"></div>
+
+    <p class="foot">Test mode uses mock data — no portal calls, no submissions. Flip <code>TEST_MODE=False</code> and provide a Gemini key for the live agent.</p>
+  </div>
+
+<script>
+const PORTAL_COLORS = { linkedin: "#0a66c2", naukri: "#4a67ff", indeed: "#2164f3", wellfound: "#1f1f1f", adzuna: "#2f7d76" };
+const STAGES = [
+  { k: "discover", nm: "Discover", ic: "🔍" },
+  { k: "tailor", nm: "Tailor", ic: "✍️" },
+  { k: "approve", nm: "Approve", ic: "👤" },
+  { k: "submit", nm: "Submit", ic: "🔒", locked: true },
+  { k: "report", nm: "Report", ic: "📊" },
+];
+const GUARDS = [
+  { t: "TEST_MODE flag", d: "Mock modules are swapped in at import — no real portal or LLM calls." },
+  { t: "auto_submit: false", d: "Re-checked in agent.py and the submit node before anything runs." },
+  { t: "Severed graph edge", d: "route_after_approve() returns END in every mode — approve never flows into submit." },
+  { t: "Submit click commented out", d: "The Playwright .click() that files the application is disabled in code." },
+];
+
+function renderGuards() {
+  document.getElementById("guards").innerHTML = GUARDS.map((g) => `
+    <div class="guard"><div class="g-ic">🔒</div>
+      <div><div class="g-t">${g.t}</div><div class="g-d">${g.d}</div></div></div>`).join("");
+}
+function renderSteps(current) {
+  const order = STAGES.map((s) => s.k);
+  const ci = order.indexOf(current);
+  document.getElementById("steps").innerHTML = STAGES.map((s, i) => {
+    let cls = "";
+    if (s.locked) cls = "locked";
+    else if (ci >= 0 && i < ci) cls = "done";
+    else if (ci >= 0 && i === ci) cls = "active";
+    return `<div class="step ${cls}"><div class="dot">${s.ic}</div><div class="nm">${s.nm}</div></div>`;
+  }).join("");
+}
+
+function ring(score) {
+  const c = score >= 90 ? "var(--ok)" : score >= 80 ? "var(--primary)" : "var(--warn)";
+  const r = 24, circ = 2 * Math.PI * r, off = circ * (1 - score / 100);
+  return `<svg class="ring" width="58" height="58" viewBox="0 0 58 58">
+    <circle cx="29" cy="29" r="${r}" fill="none" stroke="#eef0f8" stroke-width="6"/>
+    <circle cx="29" cy="29" r="${r}" fill="none" stroke="${c}" stroke-width="6" stroke-linecap="round"
+      stroke-dasharray="${circ}" stroke-dashoffset="${circ}" transform="rotate(-90 29 29)">
+      <animate attributeName="stroke-dashoffset" from="${circ}" to="${off}" dur="0.9s" fill="freeze" calcMode="spline" keySplines="0.22 1 0.36 1" keyTimes="0;1"/>
+    </circle>
+    <text x="29" y="33" text-anchor="middle" font-size="15" font-weight="700" fill="${c}">${score}</text></svg>`;
+}
+
+function animateNum(el, target) {
+  const dur = 700, start = performance.now();
+  const step = (t) => { const p = Math.min(1, (t - start) / dur); el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3))); if (p < 1) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+function renderStats(jobs) {
+  const n = jobs.length;
+  const avg = n ? Math.round(jobs.reduce((s, j) => s + (j.match_score || 0), 0) / n) : 0;
+  const top = n ? Math.max(...jobs.map((j) => j.match_score || 0)) : 0;
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><div class="n" data-v="${n}">0</div><div class="l">roles matched</div></div>
+    <div class="stat"><div class="n" data-v="${avg}">0</div><div class="l">avg match score</div></div>
+    <div class="stat"><div class="n" data-v="${top}">0</div><div class="l">top match</div></div>
+    <div class="stat safe"><div class="n">0</div><div class="l">applications submitted</div></div>`;
+  document.querySelectorAll("#stats .n[data-v]").forEach((el) => animateNum(el, +el.dataset.v));
+}
+
+async function tailor(jobId, btn) {
+  const out = document.getElementById("tl-" + jobId);
+  if (out.dataset.open === "1") { out.innerHTML = ""; out.dataset.open = "0"; return; }
+  out.innerHTML = '<span style="font-size:.8rem;color:var(--muted);">Tailoring…</span>';
+  try {
+    const d = await (await fetch("/tailoring/" + jobId)).json();
+    const bar = (label, before, after, max) => {
+      const bw = Math.round((before / max) * 100), aw = Math.round((after / max) * 100);
+      return `<div class="tl-row"><span class="tl-k">${label}</span>
+        <span class="tl-track"><span class="tl-before" style="width:${bw}%"></span><span class="tl-after" style="width:0" data-w="${aw}"></span></span>
+        <span class="tl-v"><span class="b">${before}</span> → <span class="a">${after}</span></span></div>`;
+    };
+    out.innerHTML = `<div class="tailor-out">
+      ${bar("Keyword match", d.keyword_before, d.keyword_after, 100)}
+      ${bar("ATS score", d.ats_before, d.ats_after, 100)}
+      ${bar("Missing keywords", d.missing_keywords_before, d.missing_keywords_after, Math.max(d.missing_keywords_before, 1))}
+    </div>`;
+    out.dataset.open = "1";
+    requestAnimationFrame(() => out.querySelectorAll(".tl-after").forEach((e) => e.style.width = e.dataset.w + "%"));
+  } catch (e) { out.innerHTML = '<span style="color:var(--crit);font-size:.8rem;">Could not tailor.</span>'; }
+}
+
+function renderJobs(jobs) {
+  document.getElementById("jobcount").textContent = jobs.length ? jobs.length + " roles · sorted by match" : "";
+  const el = document.getElementById("jobs");
+  if (!jobs.length) { el.innerHTML = '<p style="color:var(--muted);">No roles yet — click “Discover jobs”.</p>'; return; }
+  jobs.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+  el.innerHTML = jobs.map((j) => {
+    const pc = PORTAL_COLORS[j.portal] || "#666";
+    return `<article class="job">
+      <div class="job-top">
+        ${ring(j.match_score || 0)}
+        <div class="job-hd"><h4>${j.role_title}</h4><p class="co">${j.company_name}</p></div>
+      </div>
+      <div class="badges">
+        <span class="badge">📍 ${j.location}</span>
+        <span class="badge">${({remote:"🌍",hybrid:"🏢","on-site":"📍"}[j.work_mode]||"")} ${j.work_mode}</span>
+        <span class="badge portal" style="background:${pc}">${j.portal}</span>
+      </div>
+      <p class="desc">${(j.job_description || "").slice(0, 140)}…</p>
+      <div class="job-actions">
+        <a class="view" href="${j.application_url}" target="_blank" rel="noopener">View role ↗</a>
+        <button class="tailor" onclick="tailor('${j.job_id}', this)">Tailor résumé</button>
+      </div>
+      <div class="tl-out" id="tl-${j.job_id}"></div>
+    </article>`;
+  }).join("");
+  requestAnimationFrame(() => el.querySelectorAll(".job").forEach((c, i) => setTimeout(() => c.classList.add("in"), i * 55)));
+}
+
+let _allJobs = [];
+function v(id) { const e = document.getElementById(id); return e ? e.value.trim() : ""; }
+
+function applyFilters() {
+  const q = v("f-q").toLowerCase(), loc = v("f-loc").toLowerCase(), work = v("f-work"), min = +v("f-min") || 0, src = v("f-src");
+  const list = _allJobs.filter((j) => {
+    if (min && (j.match_score || 0) < min) return false;
+    if (work && j.work_mode !== work) return false;
+    if (src && j.portal !== src) return false;
+    if (loc && !((j.location || "").toLowerCase().includes(loc) || (loc === "remote" && j.work_mode === "remote"))) return false;
+    if (q) {
+      const hay = ((j.role_title || "") + " " + (j.company_name || "") + " " + (j.job_description || "")).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const jc = document.getElementById("jobcount");
+  if (!list.length && _allJobs.length) {
+    document.getElementById("jobs").innerHTML = '<p style="color:var(--muted);">No roles match these filters. <button class="linkish" id="f-reset2">Clear filters</button></p>';
+    jc.textContent = "0 of " + _allJobs.length + " roles";
+    const r = document.getElementById("f-reset2"); if (r) r.addEventListener("click", clearFilters);
+    return;
+  }
+  renderJobs(list);
+  jc.textContent = _allJobs.length ? (list.length + " of " + _allJobs.length + " roles") : "";
+}
+
+function clearFilters() {
+  ["f-q", "f-role", "f-loc", "f-work", "f-min", "f-src"].forEach((id) => {
+    const e = document.getElementById(id); if (!e) return;
+    if (e.tagName === "SELECT") e.selectedIndex = 0; else e.value = "";
+  });
+  applyFilters();
+}
+
+async function loadJobs() {
+  try {
+    const d = await (await fetch("/jobs")).json();
+    _allJobs = d.jobs || [];
+    renderStats(_allJobs); applyFilters();
+  } catch (e) { console.error(e); }
+}
+
+const runbar = document.getElementById("runbar");
+async function run(phase, btn) {
+  document.querySelectorAll(".controls .btn").forEach((b) => (b.disabled = true));
+  const role = v("f-role"), loc = v("f-loc"), work = v("f-work");
+  const scope = [role, loc, work && work + " roles"].filter(Boolean).join(" · ");
+  runbar.innerHTML = '<span class="spin"></span>Running ' + phase + ' phase' + (scope ? ' — ' + scope : '') + '…';
+  const active = phase === "full" ? "tailor" : "discover";
+  renderSteps(active);
+  try {
+    await fetch("/run-agent", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phase, skills: ["python", "nestjs", "react", "nodejs", "ai", "langchain"], role: role || null, location: loc || null, work_type: work || null }) });
+    setTimeout(async () => {
+      const st = await (await fetch("/status")).json();
+      runbar.textContent = "✅ " + (st.message || "Done");
+      renderSteps(phase === "full" ? "approve" : "discover");
+      await loadJobs();
+      document.querySelectorAll(".controls .btn").forEach((b) => (b.disabled = false));
+    }, 2600);
+  } catch (e) {
+    runbar.textContent = "Could not start the agent.";
+    document.querySelectorAll(".controls .btn").forEach((b) => (b.disabled = false));
+  }
+}
+document.getElementById("btn-discover").addEventListener("click", () => run("discover"));
+document.getElementById("btn-full").addEventListener("click", () => run("full"));
+
+// live client-side filtering of the displayed roles
+["f-q", "f-loc", "f-work", "f-min", "f-src"].forEach((id) => {
+  const e = document.getElementById(id);
+  if (e) { e.addEventListener("input", applyFilters); e.addEventListener("change", applyFilters); }
+});
+document.getElementById("f-clear").addEventListener("click", clearFilters);
+
+// upload
+const drop = document.getElementById("drop"), file = document.getElementById("file");
+file.addEventListener("change", (e) => e.target.files[0] && upload(e.target.files[0]));
+["dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("dragover"); }));
+["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove("dragover")));
+drop.addEventListener("drop", (e) => { e.preventDefault(); e.dataTransfer.files[0] && upload(e.dataTransfer.files[0]); });
+async function upload(f) {
+  runbar.innerHTML = '<span class="spin"></span>Uploading résumé…';
+  const fd = new FormData(); fd.append("file", f);
+  try { const r = await (await fetch("/upload-resume", { method: "POST", body: fd })).json(); runbar.textContent = "✅ " + (r.message || "Uploaded"); }
+  catch (e) { runbar.textContent = "Upload failed."; }
+}
+
+renderGuards();
+renderSteps("discover");
+loadJobs();
+fetch("/mode").then((r) => r.json()).then((m) => {
+  const pill = document.getElementById("modePill");
+  pill.innerHTML = '<span class="lock">🔒</span> ' + (m.live ? "Live · Adzuna · submission disabled" : "Test mode · submission disabled");
+}).catch(() => {});
+</script>
+</body>
+</html>

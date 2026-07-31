@@ -31,6 +31,7 @@ class Portal(str, Enum):
     NAUKRI = "naukri"
     INDEED = "indeed"
     WELLFOUND = "wellfound"
+    ADZUNA = "adzuna"
 
 
 class Job(BaseModel):
