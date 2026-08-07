@@ -7,7 +7,7 @@
 #                                            +----------+----------+
 #                                            |                     |
 #                                          redis              postgres
-#                                  (distributed lock)    (durable ledger - optional)
+#                                  (distributed lock)    (shared durable ledger)
 #
 #  IMPORTANT: `agent-app` intentionally has NO `container_name` and publishes NO
 #  host port. That is what allows `docker compose up --scale agent-app=3` to spin
@@ -56,10 +56,9 @@ services:
     networks:
       - ledger-net
 
-  # Postgres is included to complete the architecture. The prototype's ledger
-  # runs in-memory (LedgerService) so the cluster is runnable with zero schema
-  # setup; swapping LedgerService for a TypeORM/Prisma repo against this DB is
-  # the natural production next step.
+  # Shared, durable ledger. LedgerService (TypeORM) reads/heals rows here, so all
+  # replicas agree after a heal. Schema auto-creates on boot (synchronize); set
+  # DB_SYNC=false + run migrations for strict production.
   postgres:
     image: postgres:16-alpine
     container_name: ledger-postgres

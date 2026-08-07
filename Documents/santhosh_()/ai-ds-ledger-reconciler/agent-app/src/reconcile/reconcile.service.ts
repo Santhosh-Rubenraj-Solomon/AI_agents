@@ -67,7 +67,7 @@ export class ReconcileService {
       summary: text,
       stepsUsed: steps.length,
       toolInvocations,
-      finalLedgerState: this.ledger.get(dto.txId),
+      finalLedgerState: await this.ledger.get(dto.txId),
     };
   }
 }

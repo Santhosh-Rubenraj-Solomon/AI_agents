@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
-import { LockModule } from '../lock/lock.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { ReconcileController } from './reconcile.controller';
 import { ReconcileService } from './reconcile.service';
 
+// IdempotencyModule is @Global (registered in AppModule.forRoot), so the
+// @IdempotencyLock() guard/interceptor are available here without importing it.
 @Module({
-  imports: [LockModule, LedgerModule],
+  imports: [LedgerModule],
   controllers: [ReconcileController],
   providers: [ReconcileService],
 })

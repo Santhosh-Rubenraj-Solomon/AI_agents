@@ -20,7 +20,7 @@ export function buildAgentTools(ledger: LedgerService, logger: Logger) {
         txId: z.string().describe('The transaction id to look up, e.g. "tx_1001".'),
       }),
       execute: async ({ txId }) => {
-        const record = ledger.get(txId);
+        const record = await ledger.get(txId);
         logger.log(`[tool] checkInternalLedger(${txId}) -> ${JSON.stringify(record)}`);
         return record ? { found: true, ...record } : { found: false, txId };
       },
@@ -41,7 +41,7 @@ export function buildAgentTools(ledger: LedgerService, logger: Logger) {
           .describe('A short justification for the decision (logged for audit).'),
       }),
       execute: async ({ txId, status, reason }) => {
-        const updated = ledger.updateStatus(txId, status);
+        const updated = await ledger.updateStatus(txId, status);
         logger.log(`[tool] updateInternalLedger(${txId}, ${status}) reason="${reason}"`);
         return updated
           ? { ok: true, record: updated }

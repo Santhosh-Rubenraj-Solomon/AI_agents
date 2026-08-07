@@ -28,17 +28,52 @@ function-calling tools.
                                       ▼                      ▼
                               ┌──────────────┐      ┌──────────────┐
                               │    Redis     │      │  PostgreSQL  │
-                              │ (dist. lock) │      │  (optional)  │
+                              │ (dist. lock) │      │(shared ledger)│
                               └──────────────┘      └──────────────┘
 ```
 
 | Concern | Implementation |
 |---|---|
 | **Load balancing** | Nginx, round-robin over scaled replicas via Docker DNS ([`nginx/nginx.conf`](nginx/nginx.conf)) |
-| **Distributed locking** | Redis `SET NX PX` + Lua compare-and-delete ([`lock.service.ts`](agent-app/src/lock/lock.service.ts)) |
-| **Concurrency guard** | NestJS guard returning `429` on lock contention ([`distributed-lock.guard.ts`](agent-app/src/lock/distributed-lock.guard.ts)) |
+| **Distributed locking** | Redis `SET NX PX` + Lua compare-and-delete ([`lock.service.ts`](agent-app/src/idempotency/lock.service.ts)) |
+| **Concurrency guard** | Reusable **`@IdempotencyLock()`** decorator + global guard returning `429` ([`idempotency/`](agent-app/src/idempotency/)) |
 | **AI agent** | Vercel AI SDK `generateText` w/ `maxSteps: 5` + 2 tools ([`reconcile.service.ts`](agent-app/src/reconcile/reconcile.service.ts)) |
-| **Ledger store** | In-memory mock seeded with drifted rows ([`ledger.service.ts`](agent-app/src/ledger/ledger.service.ts)) |
+| **Ledger store** | **Shared PostgreSQL via TypeORM** — every replica reads/heals the same rows ([`ledger.service.ts`](agent-app/src/ledger/ledger.service.ts)) |
+
+---
+
+## Reusable: `@IdempotencyLock()`
+
+The distributed lock is packaged as a **drop-in NestJS module** you can lift into any service —
+this is the reusable core of the whole project ([`agent-app/src/idempotency/`](agent-app/src/idempotency/)).
+
+```ts
+// 1. register once (reuse an existing ioredis client, or pass connection options)
+@Module({
+  imports: [
+    IdempotencyModule.forRoot({
+      redis: { host: 'redis', port: 6379 },
+      defaultTtlMs: 10_000,
+      keyPrefix: 'lock:',
+    }),
+  ],
+})
+export class AppModule {}
+
+// 2. decorate any handler — concurrent/duplicate calls for the same key get 429
+@Post('payment-reconcile')
+@IdempotencyLock()                                   // key = body.txId, 10s window
+async reconcile(@Body() dto: ReconcileDto) { ... }
+
+@IdempotencyLock({ key: 'orderId', ttlMs: 30_000, release: 'on-complete' })
+@IdempotencyLock({ key: (req) => req.headers['idempotency-key'] })
+```
+
+- **`key`** — body field name (default `txId`) or a function of the request.
+- **`ttlMs`** — lock TTL; falls back to the module default.
+- **`release`** — `'hold'` (default: the TTL *is* the idempotency window) or `'on-complete'`
+  (an interceptor releases the lock once the handler settles, allowing immediate reprocessing).
+- Or use the raw primitive directly: `LockService.acquire / release / withLock`.
 
 ---
 
@@ -172,8 +207,8 @@ In the cluster logs you'll see one replica `acquired lock for txId=tx_1001` and 
 > **Design note — TTL as idempotency window.** The lock is acquired with a 10s TTL and is *not*
 > released on success, so a duplicate `txId` within 10s is rejected rather than reprocessed. The
 > TTL guarantees no deadlock if a holder crashes. To allow immediate legitimate reprocessing
-> instead, call `lock.release(txId, req.lockToken)` in a `finally` block (helper already provided
-> in [`LockService`](agent-app/src/lock/lock.service.ts)).
+> instead, pass `@IdempotencyLock({ release: 'on-complete' })` — the interceptor releases the
+> lock as soon as the handler settles ([`idempotency/`](agent-app/src/idempotency/)).
 
 ---
 
@@ -189,9 +224,9 @@ ai-ds-ledger-reconciler/
         ├── main.ts             # bootstrap, X-Instance-Name middleware
         ├── app.module.ts
         ├── app.controller.ts   # GET / and /health (LB demo)
-        ├── redis/              # shared ioredis client (global module)
-        ├── lock/               # LockService + DistributedLockGuard
-        ├── ledger/             # in-memory mock ledger
+        ├── idempotency/        # REUSABLE distributed-lock module: @IdempotencyLock()
+        │                       #   decorator + guard + interceptor + LockService + Redis
+        ├── ledger/             # shared Postgres ledger (TypeORM entity + repository)
         └── reconcile/          # AI agent: controller, service, tools, DTO
 ```
 
@@ -200,5 +235,15 @@ ai-ds-ledger-reconciler/
 ```bash
 cd agent-app
 npm install
-REDIS_HOST=localhost OPENAI_API_KEY=sk-... npm run start:dev   # needs a local redis
+# needs a local redis + postgres (schema auto-creates on boot via synchronize)
+REDIS_HOST=localhost \
+DATABASE_URL=postgres://ledger:ledger@localhost:5432/ledger \
+OPENAI_API_KEY=sk-... \
+  npm run start:dev
 ```
+
+> **What changed to make it production-ready.** The original prototype's ledger was a
+> per-replica in-memory `Map`, so the distributed lock protected state that wasn't actually
+> shared — after a heal, only the serving replica agreed. The ledger now lives in shared
+> **Postgres (TypeORM)**, so every replica reads and heals the same rows. The lock itself was
+> extracted into the reusable [`IdempotencyModule`](agent-app/src/idempotency/) above.

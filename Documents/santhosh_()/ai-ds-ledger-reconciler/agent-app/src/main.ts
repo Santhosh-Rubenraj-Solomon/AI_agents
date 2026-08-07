@@ -7,6 +7,10 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Let @nestjs lifecycle hooks (e.g. the Redis client's onApplicationShutdown)
+  // fire on SIGINT/SIGTERM so connections close cleanly.
+  app.enableShutdownHooks();
+
   // os.hostname() inside a container == the container/replica id, so it
   // uniquely identifies WHICH of the scaled agent-app instances we are.
   const instance = os.hostname();

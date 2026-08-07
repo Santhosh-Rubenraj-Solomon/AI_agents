@@ -1,5 +1,5 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
-import { DistributedLockGuard } from '../lock/distributed-lock.guard';
+import { Body, Controller, Post } from '@nestjs/common';
+import { IdempotencyLock } from '../idempotency/idempotency.decorator';
 import { ReconcileDto } from './dto/reconcile.dto';
 import { ReconcileService } from './reconcile.service';
 
@@ -10,12 +10,13 @@ export class ReconcileController {
   /**
    * POST /webhook/payment-reconcile
    *
-   * Guard chain: DistributedLockGuard runs first and acquires a per-txId Redis
-   * lock. Duplicate/concurrent calls for the same txId are rejected with 429
-   * before the (expensive) AI agent is ever invoked.
+   * @IdempotencyLock() acquires a per-txId Redis lock before the handler runs.
+   * A duplicate/concurrent webhook for the same txId is rejected with 429 —
+   * before the (expensive) AI agent is ever invoked. With the default
+   * `release: 'hold'`, the 10s TTL doubles as an idempotency window.
    */
   @Post('payment-reconcile')
-  @UseGuards(DistributedLockGuard)
+  @IdempotencyLock() // key = body.txId, 10s idempotency window
   async paymentReconcile(@Body() dto: ReconcileDto) {
     return this.reconcileService.reconcile(dto);
   }
