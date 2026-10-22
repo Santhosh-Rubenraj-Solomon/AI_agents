@@ -12,7 +12,7 @@ vi.mock("node:child_process", () => ({
 import { execFile } from "node:child_process";
 import { removeWorktree } from "../src/services/gitService.js";
 import { pruneOrphanedWorktrees, startTtlTimer, stopTtlTimer } from "../src/state/ttl.js";
-import { closeDb, createTask, getTask } from "../src/state/store.js";
+import { closeDb, createPendingRequest, createTask, getPendingRequest, getTask, resolvePendingRequest } from "../src/state/store.js";
 import { createFakeApp, makeState } from "./helpers.js";
 
 const MIN = 60_000;
@@ -98,6 +98,34 @@ describe("TTL timer", () => {
     await vi.advanceTimersByTimeAsync(MIN);
     expect(getTask(old.taskId)).toBeNull();
     expect(getTask(recent.taskId)).not.toBeNull();
+  });
+
+  it("prunes old resolved approval requests", async () => {
+    const { app } = createFakeApp();
+    vi.setSystemTime(T0 - 25 * 60 * MIN);
+    createPendingRequest("done", "U", {});
+    resolvePendingRequest("done", "approved");
+    vi.setSystemTime(T0);
+    createPendingRequest("waiting", "U", {});
+    startTtlTimer(app);
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(getPendingRequest("done")).toBeNull();
+    expect(getPendingRequest("waiting")).not.toBeNull();
+  });
+
+  it("also notifies the requester's DM thread when a plan expires", async () => {
+    const { app, client } = createFakeApp();
+    const t = makeState({
+      currentPhase: "awaiting_plan_approval",
+      updatedAt: T0 - 90 * MIN,
+      requesterChannelId: "D_UREQ",
+      requesterThreadTs: "7.7",
+    });
+    createTask(t);
+    startTtlTimer(app);
+    await vi.advanceTimersByTimeAsync(MIN);
+    const channels = client.chat.postMessage.mock.calls.map((c: any) => c[0].channel);
+    expect(channels).toEqual([t.request.channelId, "D_UREQ"]);
   });
 
   it("startTtlTimer is idempotent (only one interval runs)", async () => {

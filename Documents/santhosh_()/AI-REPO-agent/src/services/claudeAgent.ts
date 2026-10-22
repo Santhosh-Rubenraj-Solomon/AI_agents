@@ -6,26 +6,26 @@
  * - execute: write mode, scoped tools
  * - review: read-only, no tools
  *
- * Prompts are written to temp files and piped via `cat file | claude -p`
- * to prevent shell injection from user-supplied descriptions.
+ * The Claude CLI is spawned directly (no shell) with an argument array and
+ * the prompt written to its stdin, so user-supplied descriptions can never
+ * be interpreted by a shell. The child gets an environment without the
+ * bot's Slack/GitLab credentials (see utils/redact.ts#scrubbedEnv).
  *
- * All calls are async (execFile wrapped in a promise). Timeouts are
- * enforced: 5min for analysis/review, 10min for execution.
+ * All calls are async. Timeouts are enforced (5min analysis/review,
+ * 10min execution): on timeout the CLI gets SIGTERM, then SIGKILL.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import { CONFIG, assertPathsInScope } from "../config.js";
 import { parseClaudeJson, TaskAnalysisSchema, getTypeLabel } from "../schemas.js";
-import type { TaskType } from "../schemas.js";
 import { createLogger } from "../utils/logger.js";
+import { scrubbedEnv } from "../utils/redact.js";
 import type {
   ClaudeAgentInterface,
   TaskAnalysis,
-  EndpointDetails,
 } from "../types.js";
 import type { FullTaskRequest } from "../types.js";
 
@@ -36,25 +36,121 @@ const ANALYSIS_TIMEOUT = 5 * 60 * 1000;  // 5 minutes
 const EXECUTION_TIMEOUT = 10 * 60 * 1000; // 10 minutes
 const CHAT_TIMEOUT = 2 * 60 * 1000;       // 2 minutes (conversational responses should be fast)
 const MAX_BUFFER = 1024 * 1024 * 10;       // 10 MB
+const KILL_GRACE_MS = 5_000;
 
-// ─── Temp file helpers ────────────────────────────────────────────────────────
-
-async function writeTmpPrompt(content: string): Promise<string> {
-  const filename = `ecr-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
-  const filepath = path.join(os.tmpdir(), filename);
-  await fs.writeFile(filepath, content, "utf-8");
-  return filepath;
-}
-
-async function cleanTmp(filepath: string): Promise<void> {
-  try {
-    await fs.unlink(filepath);
-  } catch {
-    // Best-effort cleanup
-  }
-}
+/** Tools denied in read-only modes (analysis, summaries, chat). */
+const READ_ONLY_DISALLOWED_TOOLS = [
+  "Bash",
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  "WebFetch",
+  "WebSearch",
+];
 
 // ─── Core Claude CLI runner ───────────────────────────────────────────────────
+
+/**
+ * Build the `claude` argument list. Exported for tests.
+ */
+export function buildClaudeArgs(tools: boolean, allowedPaths: string[]): string[] {
+  const args: string[] = ["-p"];
+
+  if (tools && allowedPaths.length > 0) {
+    const toolList = [
+      "Edit",
+      "Write",
+      "Read",
+      ...allowedPaths.map((p) => `Bash(find:${p})`),
+      ...allowedPaths.map((p) => `Bash(cat:${p})`),
+    ].join(",");
+    args.push("--allowedTools", toolList);
+  } else {
+    // Read-only modes (analysis, summaries, chat): explicitly deny every
+    // tool that can modify files, run commands or reach the network, so a
+    // prompt-injected request cannot escalate beyond reading the repo.
+    args.push("--allowedTools", "");
+    args.push("--disallowedTools", READ_ONLY_DISALLOWED_TOOLS.join(","));
+  }
+  return args;
+}
+
+/**
+ * Spawn a command without a shell, feed `input` on stdin, and collect
+ * stdout. Rejects on non-zero exit, spawn error, timeout or oversized output.
+ */
+export function runWithStdin(
+  command: string,
+  args: string[],
+  input: string,
+  opts: { cwd: string; timeout: number; env?: NodeJS.ProcessEnv; maxBuffer?: number },
+): Promise<string> {
+  const maxBuffer = opts.maxBuffer ?? MAX_BUFFER;
+
+  return new Promise<string>((resolve, reject) => {
+    const proc = spawn(command, args, {
+      cwd: opts.cwd,
+      env: opts.env ?? scrubbedEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
+
+    const finish = (err: Error | null, out?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(out ?? "");
+    };
+
+    const kill = () => {
+      proc.kill("SIGTERM");
+      killTimer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+      killTimer.unref?.();
+    };
+
+    const timer = setTimeout(() => {
+      kill();
+      finish(new Error(`${command} timed out after ${Math.round(opts.timeout / 1000)}s`));
+    }, opts.timeout);
+
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.length > maxBuffer) {
+        kill();
+        finish(new Error(`${command} output exceeded ${maxBuffer} bytes`));
+      }
+    });
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      // Keep only the tail — enough for an error message.
+      stderr = (stderr + chunk.toString()).slice(-4000);
+    });
+
+    proc.on("error", (err) => finish(new Error(`Failed to spawn ${command}: ${err.message}`)));
+    proc.on("close", (code, signal) => {
+      if (killTimer) clearTimeout(killTimer);
+      if (code === 0) {
+        finish(null, stdout);
+      } else {
+        finish(
+          new Error(
+            `${command} exited with ${code !== null ? `code ${code}` : `signal ${signal}`}` +
+              (stderr.trim() ? `: ${stderr.trim().slice(-1000)}` : "")
+          )
+        );
+      }
+    });
+
+    // EPIPE if the child exits before reading stdin — surfaced via close/error.
+    proc.stdin?.on("error", () => {});
+    proc.stdin?.end(input, "utf-8");
+  });
+}
 
 async function runClaude(
   prompt: string,
@@ -75,42 +171,17 @@ async function runClaude(
   });
   const startTime = Date.now();
 
-  const tmpFile = await writeTmpPrompt(prompt);
+  const stdout = await runWithStdin("claude", buildClaudeArgs(tools, allowedPaths), prompt, {
+    cwd,
+    timeout,
+    maxBuffer: MAX_BUFFER,
+    env: scrubbedEnv(),
+  });
 
-  try {
-    // Build the claude command arguments
-    const args: string[] = ["-p"];
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  log.info("Claude CLI returned", { elapsedSec: elapsed, responseLength: stdout.length });
 
-    if (tools && allowedPaths.length > 0) {
-      const toolList = [
-        "Edit",
-        "Write",
-        "Read",
-        ...allowedPaths.map((p) => `Bash(find:${p})`),
-        ...allowedPaths.map((p) => `Bash(cat:${p})`),
-      ].join(",");
-      args.push("--allowedTools", toolList);
-    } else {
-      args.push("--allowedTools", "");
-    }
-
-    // Use shell to pipe the prompt: cat file | claude -p ...
-    const shellCmd = `cat "${tmpFile}" | claude ${args.map(a => `"${a}"`).join(" ")}`;
-
-    const { stdout } = await execFileAsync("/bin/bash", ["-c", shellCmd], {
-      cwd,
-      timeout,
-      maxBuffer: MAX_BUFFER,
-      env: { ...process.env },
-    });
-
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    log.info("Claude CLI returned", { elapsedSec: elapsed, responseLength: stdout.length });
-
-    return stdout;
-  } finally {
-    await cleanTmp(tmpFile);
-  }
+  return stdout;
 }
 
 // ─── Concrete implementation ──────────────────────────────────────────────────
@@ -216,19 +287,28 @@ async function getServiceFileTree(cwd: string): Promise<string> {
 
 /**
  * Get shared imports used by the service.
+ *
+ * Runs grep via execFile with an argument array (no shell), then sorts,
+ * de-duplicates and truncates in JS — equivalent to the old
+ * `grep ... | sort -u | head -40` pipeline without shell interpolation of
+ * the configured paths.
  */
-async function getSharedImports(cwd: string): Promise<string> {
+export async function getSharedImports(cwd: string): Promise<string> {
+  const grepPaths = CONFIG.allowedServicePaths.map((p) => `${p}/src`);
+  let stdout = "";
   try {
-    const grepPaths = CONFIG.allowedServicePaths.map((p) => `${p}/src`).join(" ");
-    const { stdout } = await execFileAsync(
-      "/bin/bash",
-      ["-c", `grep -rh "from '@" ${grepPaths} --include="*.ts" 2>/dev/null | sort -u | head -40`],
-      { cwd, timeout: 10_000 }
-    );
-    return stdout || "None";
-  } catch {
-    return "None";
+    ({ stdout } = await execFileAsync(
+      "grep",
+      ["-rh", "--include=*.ts", "-e", "from '@", "--", ...grepPaths],
+      { cwd, timeout: 10_000, maxBuffer: MAX_BUFFER }
+    ));
+  } catch (err: unknown) {
+    // grep exits 1 for "no match" and 2 for missing paths, but may still
+    // have printed matches for the paths that do exist.
+    stdout = (err as { stdout?: string }).stdout ?? "";
   }
+  const lines = [...new Set(stdout.split("\n").filter(Boolean))].sort().slice(0, 40);
+  return lines.length > 0 ? lines.join("\n") + "\n" : "None";
 }
 
 /**

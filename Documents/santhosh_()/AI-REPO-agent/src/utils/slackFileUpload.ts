@@ -11,6 +11,7 @@
 
 import type { WebClient } from "@slack/web-api";
 import { createLogger } from "./logger.js";
+import { redactSecrets } from "./redact.js";
 
 const log = createLogger("SlackFileUpload");
 
@@ -44,8 +45,8 @@ export async function uploadMdToSlack(
       channel_id: channelId,
       thread_ts: threadTs,
       filename,
-      content,
-      initial_comment: message ?? `Attached: ${filename}`,
+      content: redactSecrets(content),
+      initial_comment: redactSecrets(message ?? `Attached: ${filename}`),
     });
 
     log.info("File uploaded successfully", { filename });

@@ -54,6 +54,9 @@ export const TaskRequestSchema = z.object({
   branchName: z.string()
     .regex(BRANCH_NAME_REGEX, "Branch name may only contain letters, numbers, hyphens, underscores, and slashes")
     .max(BRANCH_NAME_MAX_LEN, `Branch name must be at most ${BRANCH_NAME_MAX_LEN} characters`)
+    .refine((n) => getBranchNameStructureError(n) === null, {
+      message: "Branch name is not a valid git branch name (no leading '-', leading/trailing '/', or '//').",
+    })
     .optional(),
 
   // MR reviewer(s) — Slack user IDs selected in the form
@@ -72,18 +75,53 @@ const TYPE_PREFIX_MAP: Record<TaskType, string> = {
   documentation: "docs",
 };
 
+/** Max length of an auto-generated branch name (prefix included). */
+const GENERATED_BRANCH_MAX_LEN = 25;
+
+/**
+ * Structural git-ref checks on top of the character whitelist.
+ *
+ * The whitelist alone accepts names git rejects or misparses: a leading "-"
+ * (e.g. "--mirror" would be read as an option by `git push`), empty path
+ * segments ("a//b"), leading/trailing slashes, and the reserved name "HEAD".
+ * Returns null if the name is structurally valid, or an error message.
+ */
+export function getBranchNameStructureError(name: string): string | null {
+  if (!name) return "Branch name must not be empty.";
+  if (!BRANCH_NAME_REGEX.test(name)) {
+    return "Branch name may only contain letters, numbers, hyphens, underscores, and slashes.";
+  }
+  if (name.startsWith("-")) return "Branch name must not start with a hyphen.";
+  if (name.startsWith("/") || name.endsWith("/")) {
+    return "Branch name must not start or end with a slash.";
+  }
+  if (name.includes("//")) return "Branch name must not contain empty path segments (\"//\").";
+  if (name.split("/").some((seg) => seg.startsWith("-"))) {
+    return "Branch name segments must not start with a hyphen.";
+  }
+  if (name === "HEAD") return "\"HEAD\" is not a valid branch name.";
+  return null;
+}
+
 /**
  * Generate a branch name from type + title if not provided.
- * Format: {prefix}/{slugified-title} truncated to ~25 chars.
+ * Format: {prefix}/{slugified-title}, at most 25 chars in total.
+ *
+ * Always returns a valid git branch name: separators are trimmed AFTER
+ * truncation (so the name never ends in "-"), and titles without any
+ * alphanumerics fall back to a unique "task-<base36 timestamp>" slug.
  */
 export function generateBranchName(type: TaskType, title: string): string {
   const prefix = TYPE_PREFIX_MAP[type];
+  const maxSlugLen = GENERATED_BRANCH_MAX_LEN - prefix.length - 1; // leave room for "prefix/"
   const slug = title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 25 - prefix.length - 1); // leave room for prefix/
-  return `${prefix}/${slug}`;
+    .replace(/^-+/, "")
+    .slice(0, maxSlugLen)
+    .replace(/-+$/, "");
+  const safeSlug = slug || `task-${Date.now().toString(36)}`.slice(0, maxSlugLen);
+  return `${prefix}/${safeSlug}`;
 }
 
 /**
@@ -91,9 +129,8 @@ export function generateBranchName(type: TaskType, title: string): string {
  * Returns null if valid, or an error message.
  */
 export function validateBranchName(name: string): string | null {
-  if (!BRANCH_NAME_REGEX.test(name)) {
-    return "Branch name may only contain letters, numbers, hyphens, underscores, and slashes.";
-  }
+  const structureError = getBranchNameStructureError(name);
+  if (structureError) return structureError;
   if (name.length > BRANCH_NAME_MAX_LEN) {
     return `Branch name must be at most ${BRANCH_NAME_MAX_LEN} characters (got ${name.length}).`;
   }

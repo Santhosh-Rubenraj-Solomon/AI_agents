@@ -16,6 +16,7 @@ import {
   PipelineStateSchema,
   EndpointDetailsSchema,
 } from "./schemas.js";
+import { redactDeep } from "./utils/redact.js";
 
 // ─── Inferred types ───────────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ export type SayFn = (
 
 /**
  * Constructs a say function from app client + stored coordinates.
+ * Message text and blocks are passed through redactDeep() so error
+ * messages that echo credentials are never posted to Slack.
  */
 export function createSayFn(
   app: App,
@@ -71,8 +74,9 @@ export function createSayFn(
   threadTs: string
 ): SayFn {
   return async (args) => {
-    const payload =
-      typeof args === "string" ? { text: args } : args;
+    const payload = redactDeep(
+      typeof args === "string" ? { text: args } : args
+    );
     await app.client.chat.postMessage({
       channel: channelId,
       thread_ts: threadTs,
@@ -94,8 +98,9 @@ export function createBroadcastSayFn(
   requesterThreadTs: string | null,
 ): SayFn {
   return async (args) => {
-    const payload =
-      typeof args === "string" ? { text: args } : args;
+    const payload = redactDeep(
+      typeof args === "string" ? { text: args } : args
+    );
 
     // Always post to admin thread
     await app.client.chat.postMessage({

@@ -30,6 +30,13 @@ describe("runMigrations", () => {
     expect(idx).toEqual(expect.arrayContaining(["idx_tasks_phase", "idx_tasks_user_id", "idx_tasks_updated_at"]));
   });
 
+  it("creates the pending_requests table for admin-approval requests", () => {
+    const db = new Database(":memory:");
+    runMigrations(db);
+    const cols = (db.prepare("PRAGMA table_info(pending_requests)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).toEqual(["request_id", "payload_json", "requester_id", "status", "created_at", "updated_at"]);
+  });
+
   it("is idempotent and preserves existing rows", () => {
     const db = new Database(":memory:");
     runMigrations(db);

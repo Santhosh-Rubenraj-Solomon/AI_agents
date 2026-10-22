@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { CONFIG, assertValidBranchName } from "../config.js";
+import { CONFIG, assertValidBranchName, isPathInScope } from "../config.js";
 import { buildConventionalCommitMessage } from "../schemas.js";
 import type { TaskType } from "../schemas.js";
 import { createLogger } from "../utils/logger.js";
@@ -34,8 +34,10 @@ const log = createLogger("Git");
  * because `.husky/_/husky.sh` resolves relative to the worktree, not
  * the main repo).
  */
-function isWorktreePath(cwd: string): boolean {
-  return cwd.startsWith(CONFIG.pipeline.worktreeBaseDir);
+export function isWorktreePath(cwd: string): boolean {
+  // Segment-aware: "/tmp/ecr-worktrees-other" is NOT inside "/tmp/ecr-worktrees".
+  const rel = path.relative(path.resolve(CONFIG.pipeline.worktreeBaseDir), path.resolve(cwd));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 async function git(
@@ -184,6 +186,8 @@ export async function cleanupOnFailure(
 
   if (branchName) {
     try {
+      // Validate before handing the name to git: "-D --foo" style injection.
+      assertValidBranchName(branchName);
       await git(["branch", "-D", branchName]);
       log.info("Deleted branch", { branchName });
     } catch {
@@ -211,20 +215,21 @@ export async function commitAndPush(
   // Stage all allowed service paths
   const allowedPaths = CONFIG.allowedServicePaths;
   for (const svcPath of allowedPaths) {
-    await git(["add", svcPath + "/"], worktreePath);
+    await git(["add", "--", svcPath + "/"], worktreePath);
   }
 
   // Safety net: unstage anything outside scope
   const staged = await git(["diff", "--cached", "--name-only"], worktreePath);
   const outOfScope = staged
     .split("\n")
-    .filter((f) => f && !allowedPaths.some((p) => f.startsWith(p)));
+    .filter((f) => f && !isPathInScope(f, allowedPaths));
 
   if (outOfScope.length > 0) {
     log.warn("Unstaging out-of-scope files", { files: outOfScope });
   }
   for (const f of outOfScope) {
-    await git(["reset", "HEAD", f], worktreePath);
+    // "--" so a file name starting with "-" is never parsed as an option.
+    await git(["reset", "HEAD", "--", f], worktreePath);
   }
 
   // Check if there are any staged changes to commit.

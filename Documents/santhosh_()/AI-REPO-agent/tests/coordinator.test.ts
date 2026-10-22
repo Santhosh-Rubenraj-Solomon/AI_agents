@@ -28,7 +28,7 @@ import { cleanupOnFailure } from "../src/services/gitService.js";
 import { generateFinalSummaryMd, postMdToThread } from "../src/services/summaryService.js";
 import { uploadMdToSlack } from "../src/utils/slackFileUpload.js";
 import { resolveGitLabReviewers } from "../src/utils/userMapping.js";
-import { cancelPipeline, executePlan, resumePipeline, startPipeline } from "../src/pipeline/coordinator.js";
+import { cancelPipeline, executePlan, isTaskRunning, resumePipeline, startPipeline } from "../src/pipeline/coordinator.js";
 import { closeDb, createTask, getDb, getTask, updateTask } from "../src/state/store.js";
 import { createFakeApp, makeAnalysis, makeState, postedTexts } from "./helpers.js";
 import type { PipelineState } from "../src/types.js";
@@ -179,16 +179,41 @@ describe("startPipeline", () => {
     expect(postedTexts(client).some((t) => t.includes("approve_plan"))).toBe(true);
   });
 
-  // BUG (src/pipeline/coordinator.ts:320 + src/handlers/planApprovalHandler.ts:22):
-  // the approval buttons are posted with the broadcast say(), so they are mirrored into
-  // the *requester's* DM, and approve_plan does not check who clicked. A non-admin
-  // requester can therefore approve their own plan, bypassing the admin gate.
-  it.skip("BUG: does not send Approve/Reject plan buttons to the requester DM", async () => {
+  // Previously a BUG: the approval buttons were posted with the broadcast say(), so they
+  // were mirrored into the *requester's* DM (and approve_plan did not check the clicker).
+  it("does not send Approve/Reject plan buttons to the requester DM", async () => {
     const { app, client } = createFakeApp();
     analyzerSucceeds();
     await startPipeline(app, { ...baseInput, requesterId: "UREQ" });
-    const toRequester = client.chat.postMessage.mock.calls.map((c: any) => c[0]).filter((m: any) => m.channel === "D_UREQ");
+    const messages = client.chat.postMessage.mock.calls.map((c: any) => c[0]);
+    const toRequester = messages.filter((m: any) => m.channel === "D_UREQ");
     expect(JSON.stringify(toRequester)).not.toContain("approve_plan");
+    // ...but the requester is told the plan awaits approval, and the admin gets the buttons
+    expect(toRequester.some((m: any) => /waiting for admin approval/.test(m.text))).toBe(true);
+    expect(JSON.stringify(messages.filter((m: any) => m.channel === "DADMIN"))).toContain("approve_plan");
+  });
+
+  it("does not send plan buttons to the requester DM when resuming from analysis", async () => {
+    const { app, client } = createFakeApp();
+    const s = seed({ currentPhase: "analyzing", requesterId: "UREQ", requesterChannelId: "D_UREQ", requesterThreadTs: "7.7" });
+    analyzerSucceeds();
+    await resumePipeline(app, s.taskId);
+    const toRequester = client.chat.postMessage.mock.calls.map((c: any) => c[0]).filter((m: any) => m.channel === "D_UREQ");
+    expect(toRequester.length).toBeGreaterThan(0);
+    expect(JSON.stringify(toRequester)).not.toContain("approve_plan");
+  });
+
+  it("marks the task failed and tells the thread when Slack posting throws mid-pipeline", async () => {
+    const { app, client } = createFakeApp();
+    analyzerSucceeds();
+    // Phase 1 message succeeds, the approval-button post fails
+    client.chat.postMessage
+      .mockResolvedValueOnce({ ok: true, ts: "1" })
+      .mockRejectedValueOnce(new Error("invalid_blocks"));
+    await expect(startPipeline(app, baseInput)).resolves.toBeUndefined();
+    const task = onlyTask();
+    expect(task.currentPhase).toBe("failed");
+    expect(postedTexts(client).some((t) => t.includes("Pipeline failed unexpectedly:* invalid_blocks"))).toBe(true);
   });
 });
 
@@ -449,6 +474,24 @@ describe("resumePipeline", () => {
     expect(run("coderAgent")).toHaveBeenCalled();
   });
 
+  it("refuses to resume a task while it is still running, and tracks running tasks", async () => {
+    const { app } = createFakeApp();
+    const s = seed({ currentPhase: "awaiting_plan_approval", analysis: makeAnalysis(), branchName: "b", worktreePath: "/wt" });
+    let release!: () => void;
+    run("coderAgent").mockImplementation(() => new Promise((r) => { release = () => r({ success: false, message: "x" }); }));
+    const exec = executePlan(s.taskId, app);
+    await new Promise((r) => setImmediate(r));
+    expect(isTaskRunning(s.taskId)).toBe(true);
+
+    await resumePipeline(app, s.taskId);
+    await executePlan(s.taskId, app); // second execute is ignored too
+    expect(run("coderAgent")).toHaveBeenCalledTimes(1);
+
+    release();
+    await exec;
+    expect(isTaskRunning(s.taskId)).toBe(false);
+  });
+
   it("returns without action for an unknown legacy phase", async () => {
     const { app, client } = createFakeApp();
     const s = makeState();
@@ -466,11 +509,11 @@ describe("resumePipeline", () => {
     expect(postedTexts(client).some((t) => t.includes("Resume failed:* Error: kaboom"))).toBe(true);
   });
 
-  // BUG (src/pipeline/coordinator.ts:427): runReviewLoop always allows maxIterations
-  // *more* reviews regardless of reviewIterations already recorded, so a resumed task
-  // can exceed MAX_REVIEW_ITERATIONS and posts labels like "Iteration 4/3".
-  it.skip("BUG: resumed review loop respects iterations already performed", async () => {
-    const { app } = createFakeApp();
+  // Previously a BUG: runReviewLoop always allowed maxIterations *more* reviews regardless
+  // of reviewIterations already recorded, so a resumed task could exceed
+  // MAX_REVIEW_ITERATIONS and post labels like "Iteration 4/3".
+  it("resumed review loop respects iterations already performed", async () => {
+    const { app, client } = createFakeApp();
     const prior = [1, 2, 3].map((i) => ({ content: "", mdPath: "", hasIssues: true, iteration: i }));
     const s = seed({ currentPhase: "reviewing", worktreePath: "/wt", analysis: makeAnalysis(), branchName: "b", reviewIterations: prior });
     reviewerSequence(true, true, true);
@@ -478,5 +521,25 @@ describe("resumePipeline", () => {
     finalizerSucceeds();
     await resumePipeline(app, s.taskId);
     expect(run("reviewerAgent")).not.toHaveBeenCalled();
+    expect(run("finalizerAgent")).toHaveBeenCalledTimes(1);
+    const texts = postedTexts(client).join("\n");
+    expect(texts).toContain("Max review iterations reached (3)");
+    expect(texts).not.toContain("Iteration 4/3");
+  });
+
+  it("a resumed review loop only uses the remaining iteration budget", async () => {
+    const { app, client } = createFakeApp();
+    const prior = [{ content: "", mdPath: "", hasIssues: true, iteration: 1 }];
+    const s = seed({ currentPhase: "reviewing", worktreePath: "/wt", analysis: makeAnalysis(), branchName: "b", reviewIterations: prior });
+    reviewerSequence(true, true, true);
+    fixerSucceeds();
+    finalizerSucceeds();
+    await resumePipeline(app, s.taskId);
+    expect(run("reviewerAgent")).toHaveBeenCalledTimes(2);
+    expect(run("fixerAgent")).toHaveBeenCalledTimes(1);
+    const texts = postedTexts(client).join("\n");
+    expect(texts).toContain("Iteration 2/3");
+    expect(texts).toContain("Iteration 3/3");
+    expect(texts).not.toContain("Iteration 4/3");
   });
 });

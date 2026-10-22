@@ -5,6 +5,7 @@ vi.mock("../src/pipeline/coordinator.js", () => ({
   executePlan: vi.fn(async () => {}),
   cancelPipeline: vi.fn(async () => {}),
   resumePipeline: vi.fn(async () => {}),
+  isTaskRunning: vi.fn(() => false),
 }));
 vi.mock("../src/middleware/rateLimit.js", () => ({ checkRateLimit: vi.fn(() => ({ allowed: true, retryAfterSeconds: 0 })) }));
 vi.mock("../src/utils/reviewerCache.js", () => ({ getReviewers: vi.fn(async () => null) }));
@@ -14,9 +15,11 @@ import { checkRateLimit } from "../src/middleware/rateLimit.js";
 import { getReviewers } from "../src/utils/reviewerCache.js";
 import { buildStep2Modal, registerSlashCommand } from "../src/handlers/slashCommandHandler.js";
 import { registerModalSubmit, registerRequestApproval } from "../src/handlers/modalSubmitHandler.js";
-import { createFakeApp } from "./helpers.js";
+import { closeDb, createPendingRequest, getPendingRequest } from "../src/state/store.js";
+import { createFakeApp, flush } from "./helpers.js";
 
 beforeEach(() => {
+  closeDb();
   vi.clearAllMocks();
   vi.mocked(checkRateLimit).mockReturnValue({ allowed: true, retryAfterSeconds: 0 });
   vi.mocked(getReviewers).mockResolvedValue(null);
@@ -205,22 +208,29 @@ describe("step 2 submission (ecr_task_modal)", () => {
       "UREQ",
     );
     expect(startPipeline).not.toHaveBeenCalled();
-    expect(client.chat.postEphemeral).toHaveBeenCalledWith(expect.objectContaining({ channel: "CSRC", user: "UREQ" }));
     const msg = client.chat.postMessage.mock.calls[0][0] as any;
     expect(msg.channel).toBe("D_UADMIN");
     const buttons = msg.blocks.find((b: any) => b.type === "actions").elements;
-    const approve = JSON.parse(buttons[0].value);
-    expect(buttons[0].action_id).toBe("approve_request");
-    expect(approve).toMatchObject({
+    expect(buttons.map((b: any) => b.action_id)).toEqual(["approve_request", "reject_request"]);
+    // The buttons carry only the stored request's ID ...
+    const requestId = buttons[0].value;
+    expect(buttons[1].value).toBe(requestId);
+    // ... and the full validated request lives in SQLite.
+    const stored = getPendingRequest(requestId)!;
+    expect(stored).toMatchObject({ requesterId: "UREQ", status: "pending" });
+    expect(stored.payload).toMatchObject({
       type: "refactor",
       title: "Clean up reports",
       branchName: "refactor/reports",
       reviewerSlackIds: ["UR9"],
-      requesterId: "UREQ",
-      adminDmChannelId: "D_UADMIN",
+      sourceChannelId: "CSRC",
       description: "Refactor: Merge methods",
     });
-    expect(JSON.parse(buttons[1].value)).toEqual({ requesterId: "UREQ", title: "Clean up reports" });
+    // The requester is only told "submitted" after the admin has the request.
+    expect(client.chat.postEphemeral).toHaveBeenCalledTimes(1);
+    expect(client.chat.postEphemeral).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: "CSRC", user: "UREQ", text: expect.stringContaining("has been submitted") }),
+    );
   });
 
   it("tells the requester when routing to the admin fails", async () => {
@@ -275,10 +285,10 @@ describe("step 2 submission (ecr_task_modal)", () => {
     expect(input.description).toBe("Feature: Tips");
   });
 
-  // BUG (src/handlers/modalSubmitHandler.ts:193-218, 227): zod issues on fields that are not
-  // in blockMap (e.g. endpointDetails.numberOfEndpoints > 20) produce no Slack errors,
-  // so the handler falls through and starts the pipeline with the *unvalidated* input.
-  it.skip("BUG: rejects numberOfEndpoints above the schema max instead of proceeding", async () => {
+  // Previously a BUG: zod issues on fields that are not in blockMap (e.g.
+  // endpointDetails.numberOfEndpoints > 20) produced no Slack errors, so the handler
+  // fell through and started the pipeline with the *unvalidated* input.
+  it("rejects numberOfEndpoints above the schema max instead of proceeding", async () => {
     const { ack } = await submit(
       step2View("feature", {
         title_block: { task_title: txt("Add tips") },
@@ -287,42 +297,113 @@ describe("step 2 submission (ecr_task_modal)", () => {
         num_endpoints_block: { num_endpoints: txt("25") },
       }),
     );
-    expect(ack).toHaveBeenCalledWith(expect.objectContaining({ response_action: "errors" }));
+    expect(ack).toHaveBeenCalledWith({ response_action: "errors", errors: { num_endpoints_block: expect.any(String) } });
     expect(startPipeline).not.toHaveBeenCalled();
   });
 
-  // BUG (src/handlers/modalSubmitHandler.ts:413): the whole request (description plus
-  // the duplicated type-specific fields) is serialised into the approve_request button
-  // value. Slack caps button values at 2000 chars, so longer requests make
-  // chat.postMessage fail; the error is only logged and the requester (already told
-  // "submitted") never hears back.
-  it.skip("BUG: keeps the approve_request button value within Slack's 2000-char limit", async () => {
+  it("rejects a non-numeric number of endpoints", async () => {
+    const { ack } = await submit(
+      step2View("feature", {
+        title_block: { task_title: txt("Add tips") },
+        feature_desc_block: { feature_description: txt("Tips") },
+        needs_endpoints_block: { needs_endpoints: sel("yes") },
+        num_endpoints_block: { num_endpoints: txt("two") },
+      }),
+    );
+    expect(ack).toHaveBeenCalledWith({
+      response_action: "errors",
+      errors: { num_endpoints_block: expect.stringMatching(/whole number/) },
+    });
+    expect(startPipeline).not.toHaveBeenCalled();
+  });
+
+  it("surfaces errors for fields without a block (e.g. bad metadata type) on the title block", async () => {
+    const { ack, client } = await submit(
+      step2View("bugfix", bugValues(), { channelId: "CSRC", type: "bugfix", priority: "urgent!!" }),
+    );
+    expect(ack).toHaveBeenCalledWith({
+      response_action: "errors",
+      errors: { title_block: expect.stringMatching(/^Invalid priority:/) },
+    });
+    expect(startPipeline).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects branch names git would misparse (leading hyphen)", async () => {
+    const { ack } = await submit(step2View("bugfix", bugValues({ branch_block: { branch_name: txt("--mirror") } })));
+    expect(ack).toHaveBeenCalledWith({ response_action: "errors", errors: { branch_block: expect.stringMatching(/hyphen/) } });
+    expect(startPipeline).not.toHaveBeenCalled();
+  });
+
+  // Previously a BUG: the whole request was serialised into the approve_request button
+  // value. Slack caps button values at 2000 chars, so long requests made
+  // chat.postMessage fail and the requester (already told "submitted") never heard back.
+  it("keeps the approve_request button value within Slack's 2000-char limit", async () => {
+    const long = "x".repeat(5000);
     const { client } = await submit(
-      step2View("bugfix", bugValues({ problem_block: { problem_description: txt("x".repeat(900)) } })),
+      step2View("bugfix", bugValues({ problem_block: { problem_description: txt(long) } })),
       "UREQ",
     );
     const msg = client.chat.postMessage.mock.calls[0][0] as any;
     const value = msg.blocks.find((b: any) => b.type === "actions").elements[0].value;
     expect(value.length).toBeLessThanOrEqual(2000);
+    // Section text is capped below Slack's 3000-char limit, but nothing is lost.
+    const section = msg.blocks.find((b: any) => b.type === "section");
+    expect(section.text.text.length).toBeLessThanOrEqual(3000);
+    expect(getPendingRequest(value)!.payload.problemDescription).toBe(long);
+  });
+
+  it("tells the requester (and does not claim success) when posting to the admin fails", async () => {
+    const fake = createFakeApp();
+    fake.client.chat.postMessage.mockRejectedValueOnce(new Error("invalid_blocks"));
+    registerModalSubmit(fake.app);
+    await fake.getView("ecr_task_modal")({ ack: vi.fn(), body: { user: { id: "UREQ" } }, view: step2View("bugfix", bugValues()) });
+    const texts = fake.client.chat.postEphemeral.mock.calls.map((c: any) => c[0].text);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatch(/Failed to route your request.*invalid_blocks/);
+  });
+
+  it("falls back to a DM when the ephemeral notice cannot be posted", async () => {
+    const fake = createFakeApp();
+    fake.client.chat.postEphemeral.mockRejectedValue(new Error("not_in_channel"));
+    registerModalSubmit(fake.app);
+    await fake.getView("ecr_task_modal")({ ack: vi.fn(), body: { user: { id: "UREQ" } }, view: step2View("bugfix", bugValues()) });
+    const dm = fake.client.chat.postMessage.mock.calls.map((c: any) => c[0]).find((m: any) => m.channel === "D_UREQ");
+    expect(dm?.text).toMatch(/has been submitted/);
+  });
+
+  it("tells the admin when their own request cannot be started", async () => {
+    const fake = createFakeApp();
+    fake.client.chat.postMessage.mockRejectedValueOnce(new Error("channel_not_found"));
+    registerModalSubmit(fake.app);
+    await fake.getView("ecr_task_modal")({ ack: vi.fn(), body: { user: { id: "UADMIN" } }, view: step2View("bugfix", bugValues()) });
+    expect(startPipeline).not.toHaveBeenCalled();
+    const texts = fake.client.chat.postEphemeral.mock.calls.map((c: any) => c[0].text);
+    expect(texts.at(-1)).toMatch(/Could not start the pipeline.*channel_not_found/);
   });
 });
 
 describe("admin approve/reject request buttons", () => {
+  const validPayload = {
+    type: "bugfix",
+    title: "T title",
+    description: "d",
+    priority: "low",
+    branchName: "fix/t",
+    reviewerSlackIds: ["UR"],
+    problemDescription: "p",
+    sourceChannelId: "CSRC",
+  };
+  const click = (value: unknown, user = "UADMIN", extra: Record<string, unknown> = { channel: { id: "DADM" }, message: { ts: "5.5" } }) => ({
+    ack: vi.fn(),
+    body: { actions: [{ value }], user: { id: user }, ...extra },
+  });
+
   it("approve_request starts the pipeline in the admin DM thread with all fields", async () => {
     const { app, client, getAction } = createFakeApp();
     registerRequestApproval(app);
-    const value = JSON.stringify({
-      type: "bugfix",
-      title: "T title",
-      description: "d",
-      priority: "low",
-      branchName: "fix/t",
-      reviewerSlackIds: ["UR"],
-      requesterId: "UREQ",
-      problemDescription: "p",
-      adminDmChannelId: "DFALLBACK",
-    });
-    await getAction("approve_request")({ ack: vi.fn(), body: { actions: [{ value }], channel: { id: "DADM" }, message: { ts: "5.5" } } });
+    createPendingRequest("req-1", "UREQ", validPayload);
+    await getAction("approve_request")(click("req-1"));
     expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: "DADM", thread_ts: "5.5" }));
     expect(vi.mocked(startPipeline).mock.calls[0][1]).toMatchObject({
       type: "bugfix",
@@ -334,33 +415,72 @@ describe("admin approve/reject request buttons", () => {
       problemDescription: "p",
       reviewerSlackIds: ["UR"],
     });
+    expect(getPendingRequest("req-1")?.status).toBe("approved");
   });
 
-  it("approve_request falls back to the stored DM channel, and ignores bad payloads", async () => {
-    const { app, getAction } = createFakeApp();
+  it("approve_request only starts one pipeline on a double click", async () => {
+    const { app, client, getAction } = createFakeApp();
+    registerRequestApproval(app);
+    createPendingRequest("req-2", "UREQ", validPayload);
+    await getAction("approve_request")(click("req-2"));
+    await getAction("approve_request")(click("req-2"));
+    expect(startPipeline).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(client.chat.postMessage.mock.calls)).toContain("already approved");
+  });
+
+  it("approve_request refuses non-admin clickers", async () => {
+    const { app, client, getAction } = createFakeApp();
+    registerRequestApproval(app);
+    createPendingRequest("req-3", "UREQ", validPayload);
+    await getAction("approve_request")(click("req-3", "UREQ"));
+    expect(startPipeline).not.toHaveBeenCalled();
+    expect(getPendingRequest("req-3")?.status).toBe("pending");
+    expect(client.chat.postEphemeral).toHaveBeenCalledWith(
+      expect.objectContaining({ user: "UREQ", text: expect.stringContaining("Only the admin") }),
+    );
+  });
+
+  it("approve_request ignores unknown ids, missing values and missing thread coordinates", async () => {
+    const { app, client, getAction } = createFakeApp();
     registerRequestApproval(app);
     const approve = getAction("approve_request");
-    await approve({ ack: vi.fn(), body: { actions: [{ value: JSON.stringify({ title: "x", adminDmChannelId: "DF" }) }], message: { ts: "1" } } });
-    expect(vi.mocked(startPipeline).mock.calls[0][1].channelId).toBe("DF");
-
-    vi.mocked(startPipeline).mockClear();
-    await approve({ ack: vi.fn(), body: { actions: [{ value: "{oops" }], message: { ts: "1" } } });
-    await approve({ ack: vi.fn(), body: { actions: [{}] } });
-    await approve({ ack: vi.fn(), body: { actions: [{ value: JSON.stringify({ title: "x" }) }] } }); // no channel/ts
+    await approve(click("does-not-exist"));
+    expect(JSON.stringify(client.chat.postMessage.mock.calls)).toContain("no longer available");
+    await approve(click(undefined));
+    createPendingRequest("req-4", "UREQ", validPayload);
+    await approve(click("req-4", "UADMIN", {})); // no channel/ts
     expect(startPipeline).not.toHaveBeenCalled();
+    expect(getPendingRequest("req-4")?.status).toBe("pending");
+  });
+
+  it("approve_request re-validates the stored request and refuses invalid ones", async () => {
+    const { app, getAction } = createFakeApp();
+    registerRequestApproval(app);
+    createPendingRequest("req-5", "UREQ", { ...validPayload, title: "x" });
+    await getAction("approve_request")(click("req-5"));
+    expect(startPipeline).not.toHaveBeenCalled();
+    expect(getPendingRequest("req-5")?.status).toBe("failed");
   });
 
   it("reject_request posts in the admin thread and DMs the requester", async () => {
     const { app, client, getAction } = createFakeApp();
     registerRequestApproval(app);
-    await getAction("reject_request")({
-      ack: vi.fn(),
-      body: { actions: [{ value: JSON.stringify({ requesterId: "UREQ", title: "T" }) }], channel: { id: "DADM" }, message: { ts: "5.5" } },
-    });
+    createPendingRequest("req-6", "UREQ", { ...validPayload, title: "T" });
+    await getAction("reject_request")(click("req-6"));
+    await flush();
     const calls = client.chat.postMessage.mock.calls.map((c: any) => c[0]);
     expect(calls[0]).toMatchObject({ channel: "DADM", thread_ts: "5.5", text: expect.stringContaining("rejected") });
     expect(client.conversations.open).toHaveBeenCalledWith({ users: "UREQ" });
     expect(calls[1]).toMatchObject({ channel: "D_UREQ", text: expect.stringContaining("was not approved") });
     expect(startPipeline).not.toHaveBeenCalled();
+    expect(getPendingRequest("req-6")?.status).toBe("rejected");
+  });
+
+  it("reject_request refuses non-admin clickers", async () => {
+    const { app, getAction } = createFakeApp();
+    registerRequestApproval(app);
+    createPendingRequest("req-7", "UREQ", validPayload);
+    await getAction("reject_request")(click("req-7", "UREQ"));
+    expect(getPendingRequest("req-7")?.status).toBe("pending");
   });
 });

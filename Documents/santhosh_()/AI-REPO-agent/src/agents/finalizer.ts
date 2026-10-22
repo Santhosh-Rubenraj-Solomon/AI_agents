@@ -101,10 +101,10 @@ export const finalizerAgent: AgentInterface<FinalizerInput, FinalizerOutput> = {
         try {
           await removeWorktree(state.worktreePath);
         } catch (err) {
-          console.error(
-            `[Finalizer] Worktree cleanup failed for ${input.taskId}:`,
-            err
-          );
+          log.error("Worktree cleanup failed (non-fatal)", {
+            taskId: input.taskId,
+            error: String(err),
+          });
         }
       }
 

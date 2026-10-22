@@ -18,7 +18,7 @@ import fs from "node:fs";
 import type { App } from "@slack/bolt";
 import { CONFIG } from "../config.js";
 import { getTaskRaw, getResumableTasks } from "../state/store.js";
-import { resumePipeline } from "../pipeline/coordinator.js";
+import { resumePipeline, isTaskRunning } from "../pipeline/coordinator.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("ResumeHandler");
@@ -136,17 +136,22 @@ export function registerResumeCommand(app: App): void {
 
     // Post acknowledgement
     const channelId = (body as any).channel?.id;
+    const running = isTaskRunning(taskId);
     if (channelId) {
       try {
         await app.client.chat.postEphemeral({
           channel: channelId,
           user: userId,
-          text: `Resuming task \`${taskId}\`... Check the task's thread for progress.`,
+          text: running
+            ? `Task \`${taskId}\` is still running. Wait for it to finish or fail before resuming it.`
+            : `Resuming task \`${taskId}\`... Check the task's thread for progress.`,
         });
       } catch {
         // Non-fatal
       }
     }
+
+    if (running) return;
 
     // Kick off resume (fire and forget — errors handled inside)
     resumePipeline(app, taskId).catch((err) => {
@@ -170,6 +175,14 @@ async function handleDirectResume(
     await respond({
       response_type: "ephemeral",
       text: `Task \`${taskId}\` not found in the database.`,
+    });
+    return;
+  }
+
+  if (isTaskRunning(taskId)) {
+    await respond({
+      response_type: "ephemeral",
+      text: `Task \`${taskId}\` is still running. Wait for it to finish or fail before resuming it.`,
     });
     return;
   }

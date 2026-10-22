@@ -17,6 +17,11 @@ import {
   getTasksByPhase,
   markInFlightTasksFailed,
   updateTask,
+  transitionPhase,
+  createPendingRequest,
+  getPendingRequest,
+  resolvePendingRequest,
+  pruneOldPendingRequests,
 } from "../src/state/store.js";
 import { makeAnalysis, makeState } from "./helpers.js";
 
@@ -233,5 +238,57 @@ describe("forceUpdatePhase", () => {
 
   it("is a no-op for unknown ids", () => {
     expect(() => forceUpdatePhase("missing", "failed")).not.toThrow();
+  });
+});
+
+describe("transitionPhase", () => {
+  it("moves the task only when it is in the expected phase (state_json + column)", () => {
+    const s = makeState({ currentPhase: "awaiting_plan_approval" });
+    createTask(s);
+    expect(transitionPhase(s.taskId, "awaiting_plan_approval", "executing")).toBe(true);
+    expect(getTask(s.taskId)?.currentPhase).toBe("executing");
+    expect(getTasksByPhase("executing").map((t) => t.taskId)).toEqual([s.taskId]);
+    // second caller loses
+    expect(transitionPhase(s.taskId, "awaiting_plan_approval", "executing")).toBe(false);
+    expect(transitionPhase(s.taskId, "awaiting_plan_approval", "cancelled")).toBe(false);
+    expect(getTask(s.taskId)?.currentPhase).toBe("executing");
+  });
+
+  it("returns false for unknown tasks", () => {
+    expect(transitionPhase("missing", "analyzing", "failed")).toBe(false);
+  });
+});
+
+describe("pending requests", () => {
+  it("stores, loads and resolves a request exactly once", () => {
+    createPendingRequest("r1", "UREQ", { title: "T", description: "x".repeat(10_000) });
+    const r = getPendingRequest("r1")!;
+    expect(r).toMatchObject({ requestId: "r1", requesterId: "UREQ", status: "pending" });
+    expect((r.payload.description as string).length).toBe(10_000);
+
+    expect(resolvePendingRequest("r1", "approved")).toBe(true);
+    expect(resolvePendingRequest("r1", "rejected")).toBe(false);
+    expect(getPendingRequest("r1")?.status).toBe("approved");
+    expect(getPendingRequest("nope")).toBeNull();
+  });
+
+  it("prunes resolved requests after 24h and unanswered ones after 7 days", () => {
+    vi.useFakeTimers();
+    const T0 = new Date("2026-03-01T00:00:00Z").getTime();
+    vi.setSystemTime(T0);
+    createPendingRequest("old-resolved", "U", {});
+    resolvePendingRequest("old-resolved", "rejected");
+    createPendingRequest("old-pending", "U", {});
+    vi.setSystemTime(T0 + 2 * 24 * 60 * MIN);
+    createPendingRequest("fresh-pending", "U", {});
+
+    expect(pruneOldPendingRequests(24 * 60 * MIN, 7 * 24 * 60 * MIN)).toBe(1);
+    expect(getPendingRequest("old-resolved")).toBeNull();
+    expect(getPendingRequest("old-pending")).not.toBeNull();
+
+    vi.setSystemTime(T0 + 8 * 24 * 60 * MIN);
+    expect(pruneOldPendingRequests(24 * 60 * MIN, 7 * 24 * 60 * MIN)).toBe(1);
+    expect(getPendingRequest("old-pending")).toBeNull();
+    expect(getPendingRequest("fresh-pending")).not.toBeNull();
   });
 });

@@ -8,16 +8,17 @@ vi.mock("../src/pipeline/coordinator.js", () => ({
   cancelPipeline: vi.fn(async () => {}),
   resumePipeline: vi.fn(async () => {}),
   startPipeline: vi.fn(async () => {}),
+  isTaskRunning: vi.fn(() => false),
 }));
 vi.mock("../src/services/claudeAgent.js", () => ({ chat: vi.fn() }));
 
-import { cancelPipeline, executePlan, resumePipeline } from "../src/pipeline/coordinator.js";
+import { cancelPipeline, executePlan, isTaskRunning, resumePipeline } from "../src/pipeline/coordinator.js";
 import { chat } from "../src/services/claudeAgent.js";
 import { registerPlanApproval } from "../src/handlers/planApprovalHandler.js";
 import { registerResumeCommand } from "../src/handlers/resumeHandler.js";
 import { registerMessageHandler } from "../src/handlers/messageHandler.js";
 import { registerAppHome } from "../src/handlers/appHomeHandler.js";
-import { closeDb, createTask, getDb } from "../src/state/store.js";
+import { closeDb, createTask, getDb, getTask } from "../src/state/store.js";
 import { createFakeApp, makeState } from "./helpers.js";
 
 beforeEach(() => {
@@ -67,25 +68,53 @@ describe("plan approval buttons", () => {
     expect(cancelPipeline).not.toHaveBeenCalled();
   });
 
-  it("reject_plan cancels with the rejecting user in the reason", async () => {
+  it("reject_plan cancels with the rejecting admin in the reason", async () => {
     const { app, getAction } = createFakeApp();
     registerPlanApproval(app);
     const s = makeState({ currentPhase: "awaiting_plan_approval" });
     createTask(s);
-    await getAction("reject_plan")(click(s.taskId, "UX"));
-    expect(cancelPipeline).toHaveBeenCalledWith(s.taskId, app, "Plan rejected by <@UX>. Pipeline cancelled.");
+    await getAction("reject_plan")(click(s.taskId, "UADMIN"));
+    expect(cancelPipeline).toHaveBeenCalledWith(s.taskId, app, "Plan rejected by <@UADMIN>. Pipeline cancelled.");
   });
 
-  // BUG (src/handlers/planApprovalHandler.ts:22-49): no check that the clicker is the
-  // admin. Combined with the coordinator mirroring the buttons into the requester's DM,
-  // a requester can approve their own plan.
-  it.skip("BUG: ignores approve_plan clicks from non-admin users", async () => {
+  // Previously a BUG (planApprovalHandler had no clicker check, and the coordinator
+  // mirrored the buttons into the requester's DM): a requester could approve their own plan.
+  it("ignores approve_plan clicks from non-admin users and tells them why", async () => {
+    const { app, client, getAction } = createFakeApp();
+    registerPlanApproval(app);
+    const s = makeState({ currentPhase: "awaiting_plan_approval" });
+    createTask(s);
+    const args = click(s.taskId, "UREQ") as any;
+    args.body.channel = { id: "D_UREQ" };
+    await getAction("approve_plan")(args);
+    expect(args.ack).toHaveBeenCalled();
+    expect(executePlan).not.toHaveBeenCalled();
+    expect(getTask(s.taskId)?.currentPhase).toBe("awaiting_plan_approval");
+    expect(client.chat.postEphemeral).toHaveBeenCalledWith({
+      channel: "D_UREQ",
+      user: "UREQ",
+      text: expect.stringContaining("Only the admin can approve"),
+    });
+  });
+
+  it("ignores reject_plan clicks from non-admin users", async () => {
     const { app, getAction } = createFakeApp();
     registerPlanApproval(app);
     const s = makeState({ currentPhase: "awaiting_plan_approval" });
     createTask(s);
-    await getAction("approve_plan")(click(s.taskId, "UREQ"));
-    expect(executePlan).not.toHaveBeenCalled();
+    await getAction("reject_plan")(click(s.taskId, "UREQ"));
+    expect(cancelPipeline).not.toHaveBeenCalled();
+    expect(getTask(s.taskId)?.currentPhase).toBe("awaiting_plan_approval");
+  });
+
+  it("a double-clicked approve_plan starts execution only once", async () => {
+    const { app, getAction } = createFakeApp();
+    registerPlanApproval(app);
+    const s = makeState({ currentPhase: "awaiting_plan_approval" });
+    createTask(s);
+    await Promise.all([getAction("approve_plan")(click(s.taskId)), getAction("approve_plan")(click(s.taskId))]);
+    expect(executePlan).toHaveBeenCalledTimes(1);
+    expect(getTask(s.taskId)?.currentPhase).toBe("executing");
   });
 });
 
@@ -118,6 +147,17 @@ describe("/ecr-resume", () => {
       await getCommand("/ecr-resume")(c);
       expect(c.respond.mock.calls[0][0].text).toMatch(re);
     }
+    expect(resumePipeline).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a task that is still running in this process", async () => {
+    const { app, getCommand } = createFakeApp();
+    registerResumeCommand(app);
+    insertRaw("run1", "reviewing");
+    vi.mocked(isTaskRunning).mockReturnValueOnce(true);
+    const c = cmd("run1");
+    await getCommand("/ecr-resume")(c);
+    expect(c.respond.mock.calls[0][0].text).toMatch(/still running/);
     expect(resumePipeline).not.toHaveBeenCalled();
   });
 
@@ -242,6 +282,30 @@ describe("message handler", () => {
     const a = dm({});
     await getEvent("message")(a);
     expect(a.say.mock.calls[0][0]).toHaveLength(3900);
+  });
+
+  it("allows only one in-flight question per user", async () => {
+    const { app, getEvent } = createFakeApp();
+    registerMessageHandler(app);
+    let release!: (v: string) => void;
+    vi.mocked(chat).mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const first = dm({ text: "q1" });
+    const p1 = getEvent("message")(first);
+    const second = dm({ text: "q2" });
+    await getEvent("message")(second);
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(second.say.mock.calls[0][0]).toMatch(/still working on your previous question/);
+
+    release("a1");
+    await p1;
+    expect(first.say).toHaveBeenCalledWith("a1");
+
+    // the user is free again afterwards (also after errors)
+    vi.mocked(chat).mockRejectedValueOnce(new Error("x")).mockResolvedValueOnce("a3");
+    await getEvent("message")(dm({ text: "q3" }));
+    const fourth = dm({ text: "q4" });
+    await getEvent("message")(fourth);
+    expect(fourth.say).toHaveBeenCalledWith("a3");
   });
 
   it("app_mention strips mentions and replies in thread", async () => {

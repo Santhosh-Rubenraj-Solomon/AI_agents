@@ -31,8 +31,8 @@ import {
   postMdToThread,
 } from "../services/summaryService.js";
 import { uploadMdToSlack } from "../utils/slackFileUpload.js";
-import { createBroadcastSayFn } from "../types.js";
-import type { PipelineState, SayFn, FullTaskRequest } from "../types.js";
+import { createBroadcastSayFn, createSayFn } from "../types.js";
+import type { PipelineState, SayFn, TaskAnalysis } from "../types.js";
 import { getTypeLabel } from "../schemas.js";
 import type { TaskType } from "../schemas.js";
 import { createLogger } from "../utils/logger.js";
@@ -49,6 +49,19 @@ import {
 } from "../agents/index.js";
 
 const log = createLogger("Coordinator");
+
+/**
+ * Task IDs with a pipeline phase currently running in this process.
+ * Used to refuse a /ecr-resume (or a second executePlan) for a task that
+ * is still being worked on, which would otherwise run two agents against
+ * the same worktree.
+ */
+const runningTasks = new Set<string>();
+
+/** True if a pipeline phase for this task is running in this process. */
+export function isTaskRunning(taskId: string): boolean {
+  return runningTasks.has(taskId);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -161,6 +174,109 @@ async function readDisagreements(worktreePath: string, taskId: string): Promise<
   }
 }
 
+/**
+ * Post the Approve/Reject plan buttons.
+ *
+ * The buttons go ONLY to the admin thread. The requester's DM thread gets a
+ * text-only notice: mirroring the buttons there would let a requester
+ * approve their own plan (approve_plan also verifies the clicker, as
+ * defence in depth).
+ */
+async function postPlanApprovalButtons(
+  app: App,
+  state: PipelineState,
+  analysis: TaskAnalysis,
+  summaryText: string,
+): Promise<void> {
+  const adminSay = createSayFn(app, state.request.channelId, state.request.threadTs);
+  await adminSay({
+    text: "Plan ready for approval",
+    blocks: [
+      { type: "divider" },
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: summaryText },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Approve Plan" },
+            style: "primary",
+            action_id: "approve_plan",
+            value: state.taskId,
+          },
+          {
+            type: "button",
+            text: { type: "plain_text", text: "Reject" },
+            style: "danger",
+            action_id: "reject_plan",
+            value: state.taskId,
+          },
+        ],
+      },
+    ],
+  });
+
+  if (state.requesterChannelId && state.requesterThreadTs) {
+    try {
+      await createSayFn(app, state.requesterChannelId, state.requesterThreadTs)(
+        `:hourglass_flowing_sand: The execution plan (branch \`${analysis.branchName}\`) is waiting for admin approval. ` +
+          `You'll see updates here once it is approved or rejected.`
+      );
+    } catch (err) {
+      log.warn("Could not notify requester that the plan awaits approval", {
+        taskId: state.taskId,
+        error: String(err),
+      });
+    }
+  }
+}
+
+/**
+ * Last-resort handler for exceptions that escape a pipeline phase (e.g. a
+ * Slack API outage while posting). Marks the task failed so it does not sit
+ * in an in-flight phase forever, and tells the admin/requester how to
+ * recover instead of failing silently.
+ */
+async function reportUnexpectedFailure(
+  taskId: string,
+  app: App,
+  phaseLabel: string,
+  err: unknown,
+): Promise<void> {
+  log.error(`${phaseLabel} threw unexpectedly`, { taskId, error: String(err) });
+
+  let state: PipelineState | null = null;
+  try {
+    state = getTask(taskId);
+    if (state && !["complete", "cancelled", "failed"].includes(state.currentPhase)) {
+      state.currentPhase = "failed";
+      updateTask(state);
+    }
+  } catch (dbErr) {
+    log.error("Could not mark task failed", { taskId, error: String(dbErr) });
+  }
+  if (!state) return;
+
+  try {
+    const say = createBroadcastSayFn(
+      app,
+      state.request.channelId,
+      state.request.threadTs,
+      state.requesterChannelId,
+      state.requesterThreadTs,
+    );
+    await say(
+      `:x: *${phaseLabel} failed unexpectedly:* ${err instanceof Error ? err.message : String(err)}\n` +
+        `Task \`${taskId}\` was marked as failed. The admin can retry with \`/ecr-resume ${taskId}\`.`
+    );
+  } catch (notifyErr) {
+    log.error("Could not notify Slack about the failure", { taskId, error: String(notifyErr) });
+  }
+}
+
 // ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
 /**
@@ -251,111 +367,91 @@ export async function startPipeline(
 
   // Persist before any async work
   createTask(state);
+  runningTasks.add(taskId);
 
-  // If a different person submitted the request, open a DM with them and
-  // create a thread so they can follow along with pipeline progress.
-  if (input.requesterId && input.requesterId !== input.userId) {
-    try {
-      const requesterDm = await app.client.conversations.open({
-        users: input.requesterId,
-      });
-      if (requesterDm.channel?.id) {
-        const introMsg = await app.client.chat.postMessage({
-          channel: requesterDm.channel.id,
-          text:
-            `:rocket: Your ${typeLabel.toLowerCase()} request *"${input.title}"* has been approved!\n` +
-            `Task ID: \`${taskId}\`\n` +
-            `I'll post updates here as the pipeline runs.`,
+  try {
+    // If a different person submitted the request, open a DM with them and
+    // create a thread so they can follow along with pipeline progress.
+    if (input.requesterId && input.requesterId !== input.userId) {
+      try {
+        const requesterDm = await app.client.conversations.open({
+          users: input.requesterId,
         });
-        if (introMsg.ts) {
-          state.requesterChannelId = requesterDm.channel.id;
-          state.requesterThreadTs = introMsg.ts;
-          updateTask(state);
+        if (requesterDm.channel?.id) {
+          const introMsg = await app.client.chat.postMessage({
+            channel: requesterDm.channel.id,
+            text:
+              `:rocket: Your ${typeLabel.toLowerCase()} request *"${input.title}"* has been approved!\n` +
+              `Task ID: \`${taskId}\`\n` +
+              `I'll post updates here as the pipeline runs.`,
+          });
+          if (introMsg.ts) {
+            state.requesterChannelId = requesterDm.channel.id;
+            state.requesterThreadTs = introMsg.ts;
+            updateTask(state);
+          }
         }
+      } catch (err) {
+        log.warn("Could not open requester DM for updates", { requesterId: input.requesterId, error: String(err) });
       }
-    } catch (err) {
-      log.warn("Could not open requester DM for updates", { requesterId: input.requesterId, error: String(err) });
     }
+
+    const say = createBroadcastSayFn(
+      app,
+      input.channelId,
+      input.threadTs,
+      state.requesterChannelId,
+      state.requesterThreadTs,
+    );
+
+    await say(
+      `:brain: *Phase 1 -- Analysis*\n` +
+        `Analyzing ${typeLabel.toLowerCase()} task within allowed services...\n` +
+        `Task ID: \`${taskId}\``
+    );
+
+    // ── Dispatch to Analyzer Agent ──
+    log.info("Dispatching to Analyzer agent", { taskId });
+    const result = await analyzerAgent.run({ taskId });
+
+    if (!result.success) {
+      log.error("Analysis failed", { taskId, error: result.message });
+      await say(`:x: *Analysis Failed:* ${result.message}`);
+      return;
+    }
+
+    log.info("Analysis complete", { taskId });
+
+    // Re-read state (agent updated it)
+    const updatedState = getTask(taskId);
+    if (!updatedState || !updatedState.analysis) return;
+
+    // Post plan markdown as a downloadable .md file in the thread
+    const planMd = generatePlanMd(
+      taskId,
+      updatedState.request,
+      updatedState.analysis
+    );
+    await broadcastMdPost(app, state, "Execution Plan", planMd, taskId);
+
+    // Post approval buttons (admin thread only)
+    await postPlanApprovalButtons(
+      app,
+      updatedState,
+      updatedState.analysis,
+      `<@${input.userId}> -- Review the plan above.\n` +
+        `*Type:* ${typeLabel}\n` +
+        `*Branch:* \`${updatedState.analysis.branchName}\`\n` +
+        `*Files:* ${updatedState.analysis.filesToChange.length} modify, ` +
+        `${updatedState.analysis.filesToCreate.length} create\n` +
+        `*Affected Services:* ${updatedState.analysis.affectedServices.join(", ") || "none"}\n` +
+        `*Complexity:* ${updatedState.analysis.estimatedComplexity}`,
+    );
+  } catch (err) {
+    await reportUnexpectedFailure(taskId, app, "Pipeline", err);
+  } finally {
+    runningTasks.delete(taskId);
   }
-
-  const say = createBroadcastSayFn(
-    app,
-    input.channelId,
-    input.threadTs,
-    state.requesterChannelId,
-    state.requesterThreadTs,
-  );
-
-  await say(
-    `:brain: *Phase 1 -- Analysis*\n` +
-      `Analyzing ${typeLabel.toLowerCase()} task within allowed services...\n` +
-      `Task ID: \`${taskId}\``
-  );
-
-  // ── Dispatch to Analyzer Agent ──
-  log.info("Dispatching to Analyzer agent", { taskId });
-  const result = await analyzerAgent.run({ taskId });
-
-  if (!result.success) {
-    log.error("Analysis failed", { taskId, error: result.message });
-    await say(`:x: *Analysis Failed:* ${result.message}`);
-    return;
-  }
-
-  log.info("Analysis complete", { taskId });
-
-  // Re-read state (agent updated it)
-  const updatedState = getTask(taskId);
-  if (!updatedState || !updatedState.analysis) return;
-
-  // Post plan markdown as a downloadable .md file in the thread
-  const planMd = generatePlanMd(
-    taskId,
-    updatedState.request,
-    updatedState.analysis
-  );
-  await broadcastMdPost(app, state, "Execution Plan", planMd, taskId);
-
-  // Post approval buttons
-  await say({
-    text: "Plan ready for approval",
-    blocks: [
-      { type: "divider" },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text:
-            `<@${input.userId}> -- Review the plan above.\n` +
-            `*Type:* ${typeLabel}\n` +
-            `*Branch:* \`${updatedState.analysis.branchName}\`\n` +
-            `*Files:* ${updatedState.analysis.filesToChange.length} modify, ` +
-            `${updatedState.analysis.filesToCreate.length} create\n` +
-            `*Affected Services:* ${updatedState.analysis.affectedServices.join(", ") || "none"}\n` +
-            `*Complexity:* ${updatedState.analysis.estimatedComplexity}`,
-        },
-      },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Approve Plan" },
-            style: "primary",
-            action_id: "approve_plan",
-            value: taskId,
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "Reject" },
-            style: "danger",
-            action_id: "reject_plan",
-            value: taskId,
-          },
-        ],
-      },
-    ],
-  });
 }
 
 // ─── PHASE 2: EXECUTION ──────────────────────────────────────────────────────
@@ -366,6 +462,24 @@ export async function startPipeline(
  * Dispatches to the Coder agent, then if successful, enters the review loop.
  */
 export async function executePlan(
+  taskId: string,
+  app: App
+): Promise<void> {
+  if (runningTasks.has(taskId)) {
+    log.warn("executePlan ignored: task is already running", { taskId });
+    return;
+  }
+  runningTasks.add(taskId);
+  try {
+    await executePlanInner(taskId, app);
+  } catch (err) {
+    await reportUnexpectedFailure(taskId, app, "Execution", err);
+  } finally {
+    runningTasks.delete(taskId);
+  }
+}
+
+async function executePlanInner(
   taskId: string,
   app: App
 ): Promise<void> {
@@ -424,7 +538,11 @@ async function runReviewLoop(
 
   const maxIterations = CONFIG.pipeline.maxReviewIterations;
 
-  for (let i = 0; i < maxIterations; i++) {
+  // The iteration number is derived from the review iterations already
+  // persisted, so a resumed task continues its budget ("Iteration 3/3")
+  // instead of getting a fresh one ("Iteration 4/3"). The attempt counter
+  // is a hard upper bound in case a reviewer ever fails to record a result.
+  for (let attempt = 0; attempt < maxIterations; attempt++) {
     // Re-read state each iteration (agents mutate it)
     const currentState = getTask(taskId);
     if (!currentState) {
@@ -433,6 +551,22 @@ async function runReviewLoop(
     }
 
     const iteration = currentState.reviewIterations.length + 1;
+
+    if (iteration > maxIterations) {
+      log.warn("Review budget already exhausted -- finalizing", {
+        taskId,
+        completedIterations: currentState.reviewIterations.length,
+        maxIterations,
+      });
+      await say(
+        `:warning: *Max review iterations reached (${maxIterations}).* ` +
+          `${currentState.reviewIterations.length} review iteration(s) were already performed. ` +
+          `Proceeding to finalize with any remaining issues.`
+      );
+      await postDisagreementsIfExist(taskId, currentState, app);
+      await finalizePipeline(taskId, app);
+      return;
+    }
 
     log.info("Review loop iteration", { taskId, iteration, maxIterations });
 
@@ -476,7 +610,7 @@ async function runReviewLoop(
     }
 
     // Review has issues — check if we have iterations left
-    if (i === maxIterations - 1) {
+    if (iteration >= maxIterations || attempt === maxIterations - 1) {
       // Last iteration — no more fix attempts
       log.warn("Max review iterations reached", { taskId, iteration, maxIterations });
       await say(
@@ -768,6 +902,23 @@ export async function resumePipeline(
   taskId: string,
   targetPhase?: string
 ): Promise<void> {
+  if (runningTasks.has(taskId)) {
+    log.warn("Resume ignored: task is still running", { taskId });
+    return;
+  }
+  runningTasks.add(taskId);
+  try {
+    await resumePipelineInner(app, taskId, targetPhase);
+  } finally {
+    runningTasks.delete(taskId);
+  }
+}
+
+async function resumePipelineInner(
+  app: App,
+  taskId: string,
+  targetPhase?: string
+): Promise<void> {
   // Use raw getter first to handle legacy phases that Zod would reject
   const { getTaskRaw, forceUpdatePhase } = await import("../state/store.js");
   const rawState = getTaskRaw(taskId);
@@ -827,42 +978,15 @@ export async function resumePipeline(
         if (!updatedState || !updatedState.analysis) return;
         const planMd = generatePlanMd(taskId, updatedState.request, updatedState.analysis);
         await broadcastMdPost(app, state, "Execution Plan", planMd, taskId);
-        await say({
-          text: "Plan ready for approval",
-          blocks: [
-            { type: "divider" },
-            {
-              type: "section",
-              text: {
-                type: "mrkdwn",
-                text:
-                  `Review the plan above.\n` +
-                  `*Branch:* \`${updatedState.analysis.branchName}\`\n` +
-                  `*Files:* ${updatedState.analysis.filesToChange.length} modify, ` +
-                  `${updatedState.analysis.filesToCreate.length} create`,
-              },
-            },
-            {
-              type: "actions",
-              elements: [
-                {
-                  type: "button",
-                  text: { type: "plain_text", text: "Approve Plan" },
-                  style: "primary",
-                  action_id: "approve_plan",
-                  value: taskId,
-                },
-                {
-                  type: "button",
-                  text: { type: "plain_text", text: "Reject" },
-                  style: "danger",
-                  action_id: "reject_plan",
-                  value: taskId,
-                },
-              ],
-            },
-          ],
-        });
+        await postPlanApprovalButtons(
+          app,
+          updatedState,
+          updatedState.analysis,
+          `Review the plan above.\n` +
+            `*Branch:* \`${updatedState.analysis.branchName}\`\n` +
+            `*Files:* ${updatedState.analysis.filesToChange.length} modify, ` +
+            `${updatedState.analysis.filesToCreate.length} create`,
+        );
         break;
 
       case "awaiting_plan_approval":
@@ -875,7 +999,8 @@ export async function resumePipeline(
 
       case "executing":
         log.info("Resume: restarting execution", { taskId });
-        await executePlan(taskId, app);
+        // Inner variant: exceptions are reported by the resume handler below.
+        await executePlanInner(taskId, app);
         break;
 
       case "reviewing":

@@ -275,3 +275,107 @@ export function forceUpdatePhase(taskId: string, newPhase: PipelinePhase): void 
     updatedAt: state.updatedAt,
   });
 }
+
+/**
+ * Atomically move a task from one phase to another.
+ *
+ * The UPDATE only matches when the task is currently in `from`, so two
+ * concurrent callers (e.g. a double-clicked "Approve Plan" button) cannot
+ * both win: exactly one gets `true`, every other caller gets `false`.
+ */
+export function transitionPhase(taskId: string, from: PipelinePhase, to: PipelinePhase): boolean {
+  const now = Date.now();
+  const result = getDb()
+    .prepare(`
+      UPDATE tasks
+      SET phase = @to,
+          state_json = json_set(state_json, '$.currentPhase', @to, '$.updatedAt', @now),
+          updated_at = @now
+      WHERE task_id = @taskId AND phase = @from
+    `)
+    .run({ taskId, from, to, now });
+  return result.changes === 1;
+}
+
+// ─── Pending (non-admin) requests ─────────────────────────────────────────────
+
+export type PendingRequestStatus = "pending" | "approved" | "rejected" | "failed";
+
+export interface PendingRequest {
+  requestId: string;
+  requesterId: string;
+  status: PendingRequestStatus;
+  payload: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Store a validated request that is waiting for the admin's decision.
+ */
+export function createPendingRequest(
+  requestId: string,
+  requesterId: string,
+  payload: Record<string, unknown>,
+): void {
+  const now = Date.now();
+  getDb()
+    .prepare(`
+      INSERT INTO pending_requests (request_id, payload_json, requester_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'pending', ?, ?)
+    `)
+    .run(requestId, JSON.stringify(payload), requesterId, now, now);
+}
+
+/**
+ * Load a stored request by ID. Returns null if not found.
+ */
+export function getPendingRequest(requestId: string): PendingRequest | null {
+  const row = getDb()
+    .prepare(`SELECT * FROM pending_requests WHERE request_id = ?`)
+    .get(requestId) as
+    | { request_id: string; payload_json: string; requester_id: string; status: PendingRequestStatus; created_at: number; updated_at: number }
+    | undefined;
+  if (!row) return null;
+  return {
+    requestId: row.request_id,
+    requesterId: row.requester_id,
+    status: row.status,
+    payload: JSON.parse(row.payload_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Atomically resolve a pending request. Returns true only for the caller
+ * that actually moved it out of "pending" (guards against double clicks).
+ */
+export function resolvePendingRequest(
+  requestId: string,
+  status: Exclude<PendingRequestStatus, "pending">,
+): boolean {
+  const result = getDb()
+    .prepare(`
+      UPDATE pending_requests SET status = ?, updated_at = ?
+      WHERE request_id = ? AND status = 'pending'
+    `)
+    .run(status, Date.now(), requestId);
+  return result.changes === 1;
+}
+
+/**
+ * Delete stored requests that were resolved more than `resolvedMaxAgeMs`
+ * ago, or are still pending after `pendingMaxAgeMs`. Returns rows deleted.
+ */
+export function pruneOldPendingRequests(resolvedMaxAgeMs: number, pendingMaxAgeMs: number): number {
+  const now = Date.now();
+  const result = getDb()
+    .prepare(`
+      DELETE FROM pending_requests
+      WHERE (status != 'pending' AND updated_at < ?)
+         OR (status = 'pending' AND updated_at < ?)
+    `)
+    .run(now - resolvedMaxAgeMs, now - pendingMaxAgeMs);
+  return result.changes;
+}

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CONFIG, assertPathsInScope, assertValidBranchName } from "../src/config.js";
+import { CONFIG, assertPathsInScope, assertValidBranchName, isPathInScope } from "../src/config.js";
 
 describe("CONFIG", () => {
   it("parses env into the config object with defaults", () => {
@@ -94,14 +94,52 @@ describe("assertPathsInScope", () => {
     );
   });
 
-  // BUG (src/config.ts:120): scope check is a raw string prefix match, so a sibling
-  // directory sharing the prefix ("apps/ecr-evil") and "../" traversal both pass.
-  it.skip("BUG: rejects sibling directories that merely share the prefix", () => {
+  // Previously a BUG: the scope check was a raw string prefix match, so a sibling
+  // directory sharing the prefix ("apps/ecr-evil") and "../" traversal both passed.
+  it("rejects sibling directories that merely share the prefix", () => {
     expect(() => assertPathsInScope(["apps/ecr-evil/x.ts"])).toThrow(/SCOPE VIOLATION/);
+    expect(() => assertPathsInScope(["libs/shared-other/index.ts"])).toThrow(/SCOPE VIOLATION/);
   });
 
-  it.skip("BUG: rejects path traversal out of the allowed directory", () => {
+  it("rejects path traversal out of the allowed directory", () => {
     expect(() => assertPathsInScope(["apps/ecr/../../etc/passwd"])).toThrow(/SCOPE VIOLATION/);
+    expect(() => assertPathsInScope(["apps/ecr/../other/x.ts"])).toThrow(/SCOPE VIOLATION/);
+    expect(() => assertPathsInScope(["../apps/ecr/x.ts"])).toThrow(/SCOPE VIOLATION/);
+  });
+
+  it("accepts traversal that stays inside the allowed directory", () => {
+    expect(() => assertPathsInScope(["apps/ecr/src/../test/a.ts", "./apps/ecr/x.ts"])).not.toThrow();
+  });
+
+  it.each([
+    "/etc/passwd",
+    "//apps/ecr/x.ts",
+    "C:/apps/ecr/x.ts",
+    "apps\\ecr\\x.ts",
+    "apps/ecr\0/x.ts",
+    "",
+  ])("rejects absolute / malformed path %j", (file) => {
+    expect(() => assertPathsInScope([file])).toThrow(/SCOPE VIOLATION/);
+  });
+
+  it("accepts absolute paths that point inside MONOREPO_ROOT", () => {
+    expect(() => assertPathsInScope(["/tmp/fake-monorepo/apps/ecr/x.ts"])).not.toThrow();
+    expect(() => assertPathsInScope(["/tmp/fake-monorepo/apps/other/x.ts"])).toThrow(/SCOPE VIOLATION/);
+  });
+});
+
+describe("isPathInScope", () => {
+  it("matches the allowed directory itself and anything below it", () => {
+    expect(isPathInScope("apps/ecr", ["apps/ecr"])).toBe(true);
+    expect(isPathInScope("apps/ecr/", ["apps/ecr/"])).toBe(true);
+    expect(isPathInScope("apps/ecr/deep/a.ts", ["apps/ecr"])).toBe(true);
+    expect(isPathInScope("apps/ecrx", ["apps/ecr"])).toBe(false);
+    expect(isPathInScope("apps", ["apps/ecr"])).toBe(false);
+  });
+
+  it("never treats an empty or '.' allowed path as 'everything'", () => {
+    expect(isPathInScope("apps/x.ts", ["."])).toBe(false);
+    expect(isPathInScope("apps/x.ts", [""])).toBe(false);
   });
 });
 
@@ -110,7 +148,7 @@ describe("assertValidBranchName", () => {
     expect(() => assertValidBranchName(name)).not.toThrow();
   });
 
-  it.each(["has space", "semi;colon", "dots..", "$(rm -rf)", ""])("rejects %j", (name) => {
+  it.each(["has space", "semi;colon", "dots..", "$(rm -rf)", "", "--mirror", "-b", "fix/-x", "/fix", "fix/", "a//b", "HEAD"])("rejects %j", (name) => {
     expect(() => assertValidBranchName(name)).toThrow(/Invalid branch name/);
   });
 });
