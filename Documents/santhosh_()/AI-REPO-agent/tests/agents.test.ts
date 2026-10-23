@@ -106,6 +106,15 @@ describe("analyzerAgent", () => {
     expect(getTask(s.taskId)?.analysis).toBeNull();
   });
 
+  it("fails the task when Claude proposes a branch name git would misparse", async () => {
+    const s = seed();
+    vi.mocked(claude.analyzeTask).mockResolvedValue(makeAnalysis({ branchName: "--mirror" }));
+    const res = await analyzerAgent.run({ taskId: s.taskId });
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/Invalid branch name/);
+    expect(getTask(s.taskId)?.currentPhase).toBe("failed");
+  });
+
   it("fails the task when analysis throws", async () => {
     const s = seed();
     vi.mocked(claude.analyzeTask).mockRejectedValue(new Error("claude timeout"));

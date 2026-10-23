@@ -9,6 +9,9 @@
  *   If lint fails with "ESLint is not a constructor", the error is
  *   treated as a non-blocking warning (lint is marked as passed).
  *   Tests remain a hard requirement.
+ *
+ * Lint/test execute code written by Claude, so they run with an
+ * environment stripped of the bot's Slack/GitLab credentials.
  */
 
 import { execFile } from "node:child_process";
@@ -16,6 +19,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import { CONFIG } from "../config.js";
 import { createLogger } from "../utils/logger.js";
+import { scrubbedEnv } from "../utils/redact.js";
 import type { NxCheckResult } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -50,10 +54,8 @@ export async function runNxChecks(worktreePath: string): Promise<NxCheckResult> 
 
   // Per-worktree nx cache to avoid contention
   const nxCacheDir = path.join(worktreePath, ".nx-cache");
-  const env = {
-    ...process.env,
-    NX_CACHE_DIRECTORY: nxCacheDir,
-  };
+  // LLM-written code runs here: never hand it the bot's credentials.
+  const env = scrubbedEnv({ NX_CACHE_DIRECTORY: nxCacheDir });
 
   // ── Lint ──
   log.info("Running nx lint", { service: svc, worktreePath });
@@ -61,6 +63,7 @@ export async function runNxChecks(worktreePath: string): Promise<NxCheckResult> 
     const { stdout } = await execFileAsync("npx", ["nx", "lint", svc], {
       cwd: worktreePath,
       timeout: LINT_TIMEOUT,
+      killSignal: "SIGKILL",
       maxBuffer: MAX_BUFFER,
       env,
     });
@@ -94,6 +97,7 @@ export async function runNxChecks(worktreePath: string): Promise<NxCheckResult> 
       {
         cwd: worktreePath,
         timeout: TEST_TIMEOUT,
+        killSignal: "SIGKILL",
         maxBuffer: MAX_BUFFER,
         env,
       }

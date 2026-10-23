@@ -1,0 +1,49 @@
+name: AI-REPO-agent CI
+
+on:
+  push:
+    paths:
+      - "Documents/santhosh_()/AI-REPO-agent/**"
+      - ".github/workflows/ai-repo-agent.yml"
+  pull_request:
+    paths:
+      - "Documents/santhosh_()/AI-REPO-agent/**"
+      - ".github/workflows/ai-repo-agent.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-repo-agent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck and test (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: "Documents/santhosh_()/AI-REPO-agent"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: "Documents/santhosh_()/AI-REPO-agent/package-lock.json"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (src)
+        run: npm run typecheck
+
+      - name: Typecheck (tests)
+        run: npm run typecheck:test
+
+      - name: Test
+        run: npm test

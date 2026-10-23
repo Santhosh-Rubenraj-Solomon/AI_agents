@@ -9,6 +9,7 @@
 import path from "node:path";
 import { z } from "zod";
 import "dotenv/config";
+import { getBranchNameStructureError } from "./schemas.js";
 
 // ─── Env schema ───────────────────────────────────────────────────────────────
 
@@ -109,6 +110,55 @@ export const CONFIG = {
 // ─── Path safety ──────────────────────────────────────────────────────────────
 
 /**
+ * Normalise a repo-relative path for scope comparison.
+ *
+ * Returns null for anything that is not a plain repo-relative path:
+ * absolute paths (other than the historical "/apps/..." form, which is
+ * treated as repo-relative), Windows drive paths, backslashes, NUL bytes,
+ * and any path that escapes its root via "..".
+ */
+function normalizeRepoPath(file: string): string | null {
+  if (typeof file !== "string" || !file || file.includes("\0") || file.includes("\\")) return null;
+  if (/^[a-zA-Z]:/.test(file)) return null;
+  // Absolute paths that point inside the monorepo are made repo-relative.
+  const repoRoot = path.posix.normalize(CONFIG.repo.root).replace(/\/+$/, "");
+  let candidate = file;
+  if (repoRoot.startsWith("/") && (file === repoRoot || file.startsWith(repoRoot + "/"))) {
+    candidate = file.slice(repoRoot.length + 1);
+  }
+  // A single leading slash has always meant "repo-relative" ("/apps/x" ==
+  // "apps/x"), so any other absolute path such as "/etc/passwd" is resolved
+  // as "etc/passwd" and fails the scope check. "//host/..." is rejected.
+  const relative = candidate.startsWith("/") ? candidate.slice(1) : candidate;
+  if (!relative || relative.startsWith("/")) return null;
+  const normalized = path.posix.normalize(relative);
+  if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) {
+    return null;
+  }
+  return normalized.replace(/\/+$/, "");
+}
+
+/**
+ * Returns true if `file` (repo-relative) lies inside one of `allowed`.
+ *
+ * Uses path normalisation plus a path-segment boundary check, so
+ * "apps/ecr-evil/x.ts" is NOT inside "apps/ecr", and
+ * "apps/ecr/../../etc/passwd" is rejected outright.
+ */
+export function isPathInScope(
+  file: string,
+  allowed: readonly string[] = CONFIG.allowedServicePaths,
+): boolean {
+  const normalized = normalizeRepoPath(file);
+  if (normalized === null) return false;
+  return allowed.some((p) => {
+    const root = normalizeRepoPath(p);
+    if (root === null || root === ".") return false;
+    return normalized === root || normalized.startsWith(root + "/");
+  });
+}
+
+/**
  * Validates that all file paths are within the allowed service boundaries.
  * Checks against all paths in ALLOWED_SERVICE_PATHS.
  * Throws immediately if any file is out of scope.
@@ -116,9 +166,7 @@ export const CONFIG = {
 export function assertPathsInScope(files: string[]): void {
   const allowed = CONFIG.allowedServicePaths;
   for (const file of files) {
-    const normalized = file.replace(/^\//, "");
-    const inScope = allowed.some((p) => normalized.startsWith(p));
-    if (!inScope) {
+    if (!isPathInScope(file, allowed)) {
       throw new Error(
         `SCOPE VIOLATION: "${file}" is outside allowed paths: ${allowed.join(", ")}`
       );
@@ -128,16 +176,17 @@ export function assertPathsInScope(files: string[]): void {
 
 // ─── Branch name validation ───────────────────────────────────────────────────
 
-const BRANCH_NAME_REGEX = /^[a-zA-Z0-9\-_/]+$/;
-
 /**
- * Validates a branch name against the allowed character set.
- * Throws if the name contains characters that could cause issues.
+ * Validates a branch name against the allowed character set and git ref
+ * structure rules (no leading "-", no empty segments, ...).
+ * Throws if the name could cause issues — in particular, a name starting
+ * with "-" would be parsed as an option by git (e.g. "--mirror").
  */
 export function assertValidBranchName(name: string): void {
-  if (!BRANCH_NAME_REGEX.test(name)) {
+  const error = getBranchNameStructureError(name);
+  if (error) {
     throw new Error(
-      `Invalid branch name "${name}" — only alphanumeric, hyphens, underscores, and slashes allowed`
+      `Invalid branch name "${name}" — only alphanumeric, hyphens, underscores, and slashes allowed (${error})`
     );
   }
 }

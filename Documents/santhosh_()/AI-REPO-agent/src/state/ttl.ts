@@ -4,7 +4,9 @@
  * Runs on a configurable interval to:
  * 1. Cancel tasks stuck in awaiting_* phases past TTL
  * 2. Delete terminal tasks older than 24h
- * 3. Prune orphaned git worktrees at startup
+ * 3. Delete resolved admin-approval requests older than 24h (and
+ *    never-answered ones older than 7 days)
+ * 4. Prune orphaned git worktrees at startup
  */
 
 import { execFile } from "node:child_process";
@@ -15,15 +17,19 @@ import {
   getOldTerminalTaskIds,
   updateTask,
   deleteTask,
+  pruneOldPendingRequests,
+  transitionPhase,
 } from "./store.js";
 import { removeWorktree } from "../services/gitService.js";
-import type { SayFn } from "../types.js";
 import type { App } from "@slack/bolt";
-import { createSayFn } from "../types.js";
+import { createBroadcastSayFn } from "../types.js";
+import { createLogger } from "../utils/logger.js";
 
 const execFileAsync = promisify(execFile);
+const log = createLogger("TTL");
 
 const TERMINAL_CLEANUP_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PENDING_REQUEST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const CHECK_INTERVAL_MS = 60 * 1000; // check every minute
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -39,7 +45,7 @@ export function startTtlTimer(app: App): void {
       await cleanupStaleTasks(app);
       await cleanupTerminalTasks();
     } catch (err) {
-      console.error("[TTL] Cleanup error:", err);
+      log.error("Cleanup error", { error: String(err) });
     }
   }, CHECK_INTERVAL_MS);
 
@@ -66,14 +72,18 @@ async function cleanupStaleTasks(app: App): Promise<void> {
   const staleTasks = getStaleTasks(ttlMs);
 
   for (const task of staleTasks) {
-    console.log(`[TTL] Cancelling stale task ${task.taskId} (phase: ${task.currentPhase})`);
+    // Claim the cancellation atomically: if the admin approved the plan in
+    // the meantime, the task is no longer awaiting approval — leave it alone.
+    if (!transitionPhase(task.taskId, task.currentPhase, "cancelled")) continue;
+
+    log.info("Cancelling stale task", { taskId: task.taskId, phase: task.currentPhase });
 
     // Clean up worktree if it exists
     if (task.worktreePath) {
       try {
         await removeWorktree(task.worktreePath);
       } catch (err) {
-        console.error(`[TTL] Failed to remove worktree for ${task.taskId}:`, err);
+        log.error("Failed to remove worktree", { taskId: task.taskId, error: String(err) });
       }
     }
 
@@ -83,13 +93,20 @@ async function cleanupStaleTasks(app: App): Promise<void> {
 
     // Notify the thread
     try {
-      const say = createSayFn(app, task.request.channelId, task.request.threadTs);
+      // Notify the admin thread and, if present, the requester's DM thread.
+      const say = createBroadcastSayFn(
+        app,
+        task.request.channelId,
+        task.request.threadTs,
+        task.requesterChannelId,
+        task.requesterThreadTs,
+      );
       await say(
         `Task \`${task.taskId}\` has expired after ${CONFIG.pipeline.taskTtlMinutes} minutes ` +
         `of inactivity. Pipeline cancelled. Submit a new request to try again.`
       );
     } catch (err) {
-      console.error(`[TTL] Failed to notify thread for ${task.taskId}:`, err);
+      log.error("Failed to notify thread", { taskId: task.taskId, error: String(err) });
     }
   }
 }
@@ -101,7 +118,12 @@ async function cleanupTerminalTasks(): Promise<void> {
   const oldIds = getOldTerminalTaskIds(TERMINAL_CLEANUP_MS);
   for (const id of oldIds) {
     deleteTask(id);
-    console.log(`[TTL] Deleted old terminal task ${id}`);
+    log.info("Deleted old terminal task", { taskId: id });
+  }
+
+  const prunedRequests = pruneOldPendingRequests(TERMINAL_CLEANUP_MS, PENDING_REQUEST_MAX_AGE_MS);
+  if (prunedRequests > 0) {
+    log.info("Deleted old approval requests", { count: prunedRequests });
   }
 }
 
@@ -115,8 +137,8 @@ export async function pruneOrphanedWorktrees(): Promise<void> {
       cwd: CONFIG.repo.root,
       timeout: 10_000,
     });
-    console.log("[TTL] Pruned orphaned worktrees");
+    log.info("Pruned orphaned worktrees");
   } catch (err) {
-    console.error("[TTL] Failed to prune worktrees:", err);
+    log.error("Failed to prune worktrees", { error: String(err) });
   }
 }

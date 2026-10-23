@@ -79,27 +79,73 @@ async function start(): Promise<void> {
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+let shuttingDown = false;
+
+/**
+ * Stop accepting Slack events first, then stop timers and close SQLite
+ * (closing the DB while a handler might still run would make it throw).
+ * A second signal, or a hung app.stop(), forces exit.
+ */
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    log.warn("Second shutdown signal received -- forcing exit", { signal });
+    process.exit(1);
+  }
+  shuttingDown = true;
   log.info("Shutting down", { signal });
+
+  const forceExit = setTimeout(() => {
+    log.error("Graceful shutdown timed out -- forcing exit", { timeoutMs: SHUTDOWN_TIMEOUT_MS });
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
+
+  let exitCode = 0;
+  try {
+    await app.stop();
+  } catch (err) {
+    exitCode = 1;
+    log.error("Error stopping Slack app", { error: String(err) });
+  }
   stopTtlTimer();
-  closeDb();
-  await app.stop();
-  process.exit(0);
+  try {
+    closeDb();
+  } catch (err) {
+    exitCode = 1;
+    log.error("Error closing SQLite", { error: String(err) });
+  }
+  clearTimeout(forceExit);
+  log.info("Shutdown complete", { exitCode });
+  process.exit(exitCode);
 }
 
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 // ─── Unhandled rejection safety net ───────────────────────────────────────────
 
 process.on("unhandledRejection", (reason) => {
-  log.error("Unhandled rejection", { reason: String(reason) });
+  const detail = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+  log.error("Unhandled rejection", { reason: detail });
   // Don't crash — log it. The pipeline has its own error handling.
+});
+
+// ─── Bolt-level error handler ─────────────────────────────────────────────────
+
+app.error(async (error) => {
+  // Errors thrown from listeners end up here instead of being swallowed.
+  log.error("Unhandled Slack listener error", { error: String(error) });
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 start().catch((err) => {
   log.error("Failed to start ECR Dev Factory", { error: String(err) });
+  try {
+    closeDb();
+  } catch {
+    // Best effort
+  }
   process.exit(1);
 });

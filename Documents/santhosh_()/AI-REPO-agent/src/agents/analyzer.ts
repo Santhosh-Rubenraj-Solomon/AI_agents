@@ -10,7 +10,7 @@
  * Slack: none (Coordinator handles all messaging)
  */
 
-import { CONFIG, assertPathsInScope } from "../config.js";
+import { assertPathsInScope, assertValidBranchName } from "../config.js";
 import { analyzeTask } from "../services/claudeAgent.js";
 import { getTask, updateTask } from "../state/store.js";
 import { createLogger } from "../utils/logger.js";
@@ -54,6 +54,10 @@ export const analyzerAgent: AgentInterface<AnalyzerInput, AnalyzerOutput> = {
 
       // Validate all paths are within service scope
       assertPathsInScope([...analysis.filesToChange, ...analysis.filesToCreate]);
+
+      // Reject branch names git would misparse (e.g. a leading "-") before
+      // the plan is shown for approval, not at worktree creation time.
+      assertValidBranchName(analysis.branchName);
 
       // Persist analysis results
       state.analysis = analysis;

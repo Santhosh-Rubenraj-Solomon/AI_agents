@@ -99,8 +99,6 @@ export const coderAgent: AgentInterface<CoderInput, CoderOutput> = {
         });
         const retryNx = await runNxChecks(worktreePath);
 
-        console.log("----");
-
         if (!retryNx.passed) {
           log.error("Nx checks still failing after auto-fix", {
             taskId: input.taskId,

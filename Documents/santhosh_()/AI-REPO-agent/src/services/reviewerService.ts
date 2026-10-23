@@ -12,6 +12,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { createLogger } from "../utils/logger.js";
+import { scrubbedEnv } from "../utils/redact.js";
 
 const log = createLogger("ReviewCLI");
 
@@ -143,7 +144,8 @@ export async function runReview(
   return new Promise<ReviewCliResult>((resolve, reject) => {
     const proc = spawn("review", args, {
       cwd: worktreePath,
-      env: { ...process.env },
+      // The reviewer reads LLM-written code — keep the bot's credentials out.
+      env: scrubbedEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

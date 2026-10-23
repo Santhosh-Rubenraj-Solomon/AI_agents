@@ -85,10 +85,10 @@ describe("reviewerCache", () => {
     expect(client.users.info).toHaveBeenCalledTimes(2);
   });
 
-  // BUG (minor, src/utils/reviewerCache.ts:47): the cache-hit check requires
-  // cachedReviewers.length > 0, so when every lookup fails/filters out, each
-  // modal open re-hits users.info for every configured ID (no negative caching).
-  it.skip("BUG: caches an empty result instead of refetching every call", async () => {
+  // Previously a BUG: the cache-hit check required cachedReviewers.length > 0, so when
+  // every lookup failed/filtered out, each modal open re-hit users.info for every
+  // configured ID (no negative caching).
+  it("caches an empty result instead of refetching every call", async () => {
     const mod = await load("BOT");
     const client = fakeClient();
     await mod.getReviewers(client);

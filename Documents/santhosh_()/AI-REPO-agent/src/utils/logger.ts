@@ -7,11 +7,16 @@
  *   - Color coding (via ANSI escape codes)
  *   - Log levels: debug, info, warn, error
  *
+ * Every line is passed through redactSecrets() so tokens echoed in error
+ * messages (git remote URLs, GitLab API bodies, ...) never reach the logs.
+ *
  * Usage:
  *   import { createLogger } from "../utils/logger.js";
  *   const log = createLogger("Coordinator");
  *   log.info("Pipeline started", { taskId: "abc123" });
  */
+
+import { redactSecrets } from "./redact.js";
 
 // ─── ANSI color codes ────────────────────────────────────────────────────────
 
@@ -44,7 +49,11 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   error: 3,
 };
 
-const MIN_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) || "debug";
+// Unknown values (e.g. a typo like "warning") fall back to "debug" instead
+// of silently disabling all logging.
+const envLevel = process.env.LOG_LEVEL?.toLowerCase();
+const MIN_LEVEL: LogLevel =
+  envLevel && envLevel in LEVEL_PRIORITY ? (envLevel as LogLevel) : "debug";
 
 function shouldLog(level: LogLevel): boolean {
   return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[MIN_LEVEL];
@@ -88,7 +97,9 @@ export function createLogger(component: string): Logger {
     const ts = formatTimestamp();
     const extraStr = formatExtra(extra);
 
-    const line = `${DIM}${ts}${RESET} ${color}${BOLD}${label}${RESET} ${color}[${component}]${RESET} ${message}${extraStr}`;
+    const line = redactSecrets(
+      `${DIM}${ts}${RESET} ${color}${BOLD}${label}${RESET} ${color}[${component}]${RESET} ${message}${extraStr}`
+    );
 
     if (level === "error") {
       console.error(line);

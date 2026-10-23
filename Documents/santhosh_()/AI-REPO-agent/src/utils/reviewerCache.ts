@@ -42,8 +42,11 @@ export async function getReviewers(
     return null;
   }
 
+  // `lastFetched > 0` (not `cachedReviewers.length > 0`) marks a completed
+  // fetch, so an empty result (all lookups failed / filtered) is cached too
+  // instead of re-hitting users.info for every ID on each modal open.
   const now = Date.now();
-  if (cachedReviewers.length > 0 && now - lastFetched < CACHE_TTL) {
+  if (lastFetched > 0 && now - lastFetched < CACHE_TTL) {
     return cachedReviewers;
   }
 

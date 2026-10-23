@@ -34,22 +34,40 @@ describe("generateBranchName", () => {
     }
   });
 
-  // BUG (src/schemas.ts:81-85): the trailing-hyphen strip runs BEFORE truncation,
-  // so truncation can leave a dangling "-" (e.g. "feat/add-tips-summary-to-").
-  it.skip("BUG: never ends with a hyphen after truncation", () => {
+  // Previously a BUG: the trailing-hyphen strip ran BEFORE truncation, so truncation
+  // could leave a dangling "-" (e.g. "feat/add-tips-summary-to-").
+  it("never ends with a hyphen after truncation", () => {
     expect(generateBranchName("feature", "Add tips summary to Z report")).not.toMatch(/-$/);
+    for (let n = 1; n < 40; n++) {
+      const name = generateBranchName("refactor", "ab ".repeat(n));
+      expect(name).not.toMatch(/-$/);
+      expect(validateBranchName(name)).toBeNull();
+    }
   });
 
-  // BUG (src/schemas.ts:79-87): a title with no alphanumerics (valid per TaskRequestSchema,
-  // min length 3) yields "fix/", which is not a valid git ref.
-  it.skip("BUG: produces a non-empty slug for symbol-only titles", () => {
-    expect(generateBranchName("bugfix", "!!!")).not.toBe("fix/");
+  // Previously a BUG: a title with no alphanumerics (valid per TaskRequestSchema,
+  // min length 3) yielded "fix/", which is not a valid git ref.
+  it("produces a non-empty, valid slug for symbol-only titles", () => {
+    for (const title of ["!!!", "???", "   ", "日本語のタイトル"]) {
+      const name = generateBranchName("bugfix", title);
+      expect(name).not.toBe("fix/");
+      expect(name).toMatch(/^fix\/task-[a-z0-9]+$/);
+      expect(name.length).toBeLessThanOrEqual(25);
+      expect(validateBranchName(name)).toBeNull();
+    }
   });
 });
 
 describe("validateBranchName", () => {
   it("returns null for valid names", () => {
     expect(validateBranchName("fix/receipt-reprint")).toBeNull();
+  });
+
+  it("rejects names git would misparse", () => {
+    expect(validateBranchName("--mirror")).toMatch(/hyphen/);
+    expect(validateBranchName("fix//x")).toMatch(/empty path segments/);
+    expect(validateBranchName("fix/")).toMatch(/slash/);
+    expect(validateBranchName("HEAD")).toMatch(/HEAD/);
   });
 
   it("rejects invalid characters", () => {

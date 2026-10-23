@@ -7,6 +7,10 @@
  *
  * Ignores bot messages, pipeline button interactions, and slash commands.
  * Routes conversational questions to Claude via the chat() function.
+ *
+ * Each user may have at most one question in flight: every question spawns
+ * a Claude CLI process, so unbounded concurrency would let a single user
+ * (or a pasted loop) exhaust the host and the API budget.
  */
 
 import type { App } from "@slack/bolt";
@@ -14,6 +18,12 @@ import { chat } from "../services/claudeAgent.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("MessageHandler");
+
+/** Users with a chat() call currently running. */
+const inFlightUsers = new Set<string>();
+
+const BUSY_MESSAGE =
+  ":hourglass_flowing_sand: I'm still working on your previous question -- I'll answer that first.";
 
 /**
  * Register message and app_mention event handlers.
@@ -40,6 +50,12 @@ export function registerMessageHandler(app: App): void {
 
     log.info("DM received", { userId, textLength: text.length });
 
+    if (inFlightUsers.has(userId)) {
+      await say(BUSY_MESSAGE);
+      return;
+    }
+    inFlightUsers.add(userId);
+
     try {
       // Show typing indicator by reacting (Slack doesn't have a "typing" API for bots)
       const response = await chat(text);
@@ -57,6 +73,8 @@ export function registerMessageHandler(app: App): void {
       await say(
         "Sorry, I ran into an error trying to answer that. Please try again in a moment."
       );
+    } finally {
+      inFlightUsers.delete(userId);
     }
   });
 
@@ -76,6 +94,14 @@ export function registerMessageHandler(app: App): void {
 
     log.info("App mention received", { textLength: cleanedText.length });
 
+    const userId: string | undefined = (event as any).user;
+    const threadTsForReply = (event as any).thread_ts || (event as any).ts;
+    if (userId && inFlightUsers.has(userId)) {
+      await say({ text: BUSY_MESSAGE, thread_ts: threadTsForReply });
+      return;
+    }
+    if (userId) inFlightUsers.add(userId);
+
     try {
       const response = await chat(cleanedText);
       log.info("App mention response sent", { responseLength: response.length });
@@ -94,6 +120,8 @@ export function registerMessageHandler(app: App): void {
         text: "Sorry, I ran into an error trying to answer that. Please try again in a moment.",
         thread_ts: (event as any).thread_ts || (event as any).ts,
       });
+    } finally {
+      if (userId) inFlightUsers.delete(userId);
     }
   });
 }
