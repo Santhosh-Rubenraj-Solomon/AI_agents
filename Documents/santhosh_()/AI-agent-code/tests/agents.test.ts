@@ -203,13 +203,28 @@ describe("advisor", () => {
     expect(prompt).not.toContain("=== src/index.ts ===");
   });
 
-  // BUG (src/agents/advisor.ts:186): the extension alternation lists "js" before "json"
-  // (and .tsx/.jsx are not listed, so "App.tsx" becomes "App.ts"); "package.json" is captured as
-  // "package.js" and never found; JSON files mentioned by the user are silently ignored.
-  it.skip("BUG: inlines .json files mentioned by the user", async () => {
+  // Regression (src/agents/advisor.ts): "js" used to match before "json" and .tsx/.jsx were
+  // missing, so "package.json" was captured as "package.js" and "App.tsx" as "App.ts".
+  it("inlines .json files mentioned by the user", async () => {
     vi.mocked(chatAI).mockResolvedValue("ok");
     await generateAdvisorResponse(ctx(), "what is in package.json?", makeProfile(), null, repo);
-    expect(vi.mocked(chatAI).mock.calls[0][0]).toContain("=== package.json ===");
+    const prompt = vi.mocked(chatAI).mock.calls[0][0];
+    expect(prompt).toContain('=== package.json ===\n{"name":"fixture"}');
+    expect(prompt).not.toContain("=== package.js ===");
+  });
+
+  it("captures .tsx/.jsx paths whole and ignores trailing punctuation", async () => {
+    const r = makeTree({ "src/App.tsx": "TSX", "src/App.ts": "TS", "src/w.jsx": "JSX" });
+    try {
+      vi.mocked(chatAI).mockResolvedValue("ok");
+      await generateAdvisorResponse(ctx(), "look at src/App.tsx, then src/w.jsx.", makeProfile(), null, r);
+      const prompt = vi.mocked(chatAI).mock.calls[0][0];
+      expect(prompt).toContain("=== src/App.tsx ===\nTSX");
+      expect(prompt).toContain("=== src/w.jsx ===\nJSX");
+      expect(prompt).not.toContain("=== src/App.ts ===");
+    } finally {
+      rmTree(r);
+    }
   });
 
   it("returns a friendly message when the AI call fails", async () => {
@@ -218,11 +233,9 @@ describe("advisor", () => {
     expect(out).toMatch(/^I encountered an error generating a response: CLI timeout/);
   });
 
-  // BUG (src/agents/advisor.ts:185-191 + techDetector.readRepoFile): file paths are taken
-  // from the user's chat message and read without a containment check, so a message
-  // mentioning "../secret.yml" leaks files outside the cloned repo into the LLM prompt
-  // (and potentially back to the chat).
-  it.skip("BUG: does not inline files outside the repository", async () => {
+  // Security regression (advisor.ts + techDetector.readRepoFile): file paths come from the
+  // user's chat message, so "../secret.yml" must not leak files outside the cloned repo.
+  it("does not inline files outside the repository", async () => {
     const outer = makeTree({ "repo/a.ts": "", "secret.yml": "token: s3cr3t" });
     try {
       vi.mocked(chatAI).mockResolvedValue("ok");

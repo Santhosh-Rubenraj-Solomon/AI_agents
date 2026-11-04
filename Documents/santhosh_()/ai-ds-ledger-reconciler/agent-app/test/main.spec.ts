@@ -43,6 +43,8 @@ describe('main.ts bootstrap', () => {
     delete process.env.PORT;
     await loadMain();
     expect(mockCreate).toHaveBeenCalledTimes(1);
+    // raw body is required for webhook HMAC verification
+    expect(mockCreate.mock.calls[0][1]).toMatchObject({ rawBody: true });
     expect(mockFakeApp.enableShutdownHooks).toHaveBeenCalled();
     const pipe = mockFakeApp.useGlobalPipes.mock.calls[0][0];
     // isolateModules loads a separate copy of @nestjs/common, so compare by name.

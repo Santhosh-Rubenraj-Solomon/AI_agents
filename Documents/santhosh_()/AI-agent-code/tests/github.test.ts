@@ -59,10 +59,16 @@ describe("parseGitHubUrl", () => {
     expect(parseGitHubUrl(url)).toBeNull();
   });
 
-  // BUG (src/services/github.ts:26-28): the name group is [^/.]+? so repo names that
-  // contain a dot (vercel/next.js, socketio/socket.io, ...) are rejected as invalid URLs.
-  it.skip("BUG: accepts repository names containing dots", () => {
+  // Regression (src/services/github.ts): repo names containing dots used to be rejected.
+  it("accepts repository names containing dots", () => {
     expect(parseGitHubUrl("https://github.com/vercel/next.js")).toEqual({ owner: "vercel", name: "next.js" });
+    expect(parseGitHubUrl("https://github.com/socketio/socket.io.git")).toEqual({ owner: "socketio", name: "socket.io" });
+    expect(parseGitHubUrl("https://github.com/vercel/next.js/tree/canary")).toEqual({ owner: "vercel", name: "next.js" });
+  });
+
+  it("rejects '.'/'..' path segments as owner or name", () => {
+    expect(parseGitHubUrl("https://github.com/../x")).toBeNull();
+    expect(parseGitHubUrl("https://github.com/a/..")).toBeNull();
   });
 });
 
@@ -106,12 +112,15 @@ describe("cloneOrPullRepo", () => {
     await expect(cloneOrPullRepo("https://github.com/acme/missing")).rejects.toThrow("Repository not found");
   });
 
-  // BUG (src/services/github.ts:79-83): parseGitHubUrl accepts deep links like
-  // ".../owner/repo/tree/main" but the *raw* URL is passed to `git clone`, which fails.
-  it.skip("BUG: clones the canonical repo URL for deep links", async () => {
-    await cloneOrPullRepo("https://github.com/acme/api/tree/main/src");
+  // Regression (src/services/github.ts): deep links used to be passed raw to `git clone`.
+  it.each([
+    "https://github.com/acme/api/tree/main/src",
+    "https://github.com/acme/api/blob/main/README.md",
+    "github.com/acme/api.git?tab=readme",
+  ])("clones the canonical repo URL for %s", async (url) => {
+    await cloneOrPullRepo(url);
     const cloneUrl = gitByPath.get("<root>").clone.mock.calls[0][0];
-    expect(cloneUrl).not.toContain("/tree/");
+    expect(cloneUrl).toBe("https://github.com/acme/api");
   });
 });
 

@@ -1,3 +1,4 @@
+import type { Type } from '@nestjs/common';
 import type { Redis, RedisOptions } from 'ioredis';
 
 /** Per-route configuration for the @IdempotencyLock() decorator. */
@@ -20,6 +21,16 @@ export interface IdempotencyLockOptions {
    *    error), allowing immediate legitimate reprocessing.
    */
   release?: 'hold' | 'on-complete';
+
+  /**
+   * DTO class to validate the request body against BEFORE the lock is taken.
+   * Guards run before pipes in Nest, so without this a malformed payload would
+   * acquire (and, with 'hold', keep) the lock for its key and then be rejected
+   * by the ValidationPipe — blocking the sender's corrected retry for the TTL.
+   * Invalid bodies are rejected with the same 400 the global ValidationPipe
+   * produces, and never touch Redis.
+   */
+  validate?: Type<unknown>;
 }
 
 /** Configuration passed to IdempotencyModule.forRoot(). */

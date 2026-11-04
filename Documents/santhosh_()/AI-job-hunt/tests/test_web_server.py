@@ -1,3 +1,4 @@
+import asyncio
 import time
 from unittest.mock import AsyncMock
 
@@ -13,7 +14,7 @@ from src.test_mode import MOCK_JOBS
 def client(monkeypatch, tmp_path):
     monkeypatch.setattr(ws, "RESUME_DIR", tmp_path / "resume")
     (tmp_path / "resume").mkdir()
-    monkeypatch.setattr(time, "sleep", lambda s: None)  # execute_agent sleeps in test mode
+    monkeypatch.setattr(ws, "TEST_MODE_DELAY_SECONDS", 0)  # execute_agent waits in test mode
     monkeypatch.setitem(ws.agent_status, "running", False)
     monkeypatch.setitem(ws.agent_status, "phase", None)
     monkeypatch.setitem(ws.agent_status, "message", "Idle")
@@ -172,14 +173,27 @@ def test_web_server_never_exposes_submission(client):
     assert not any("submit" in p for p in paths)
 
 
-# Minor bug: web_server.py:463 calls the blocking time.sleep(1) inside the
-# `async def execute_agent` coroutine, which freezes the whole event loop
-# (including /status polling) for a second on every test-mode run. It should be
-# `await asyncio.sleep(1)`.
-@pytest.mark.xfail(reason="web_server.py:463 blocks the event loop with time.sleep in async code", strict=True)
+# Regression: web_server.py used to call the blocking time.sleep(1) inside the
+# `async def execute_agent` coroutine, freezing the event loop (including
+# /status polling). It must yield to the loop instead.
 async def test_execute_agent_does_not_block_event_loop(monkeypatch):
     calls = []
     monkeypatch.setattr(time, "sleep", lambda s: calls.append(s))
     monkeypatch.setattr(ws, "mock_discovery", lambda skills=None: [])
-    await ws.execute_agent("discover", None, None)
+    monkeypatch.setattr(ws, "TEST_MODE_DELAY_SECONDS", 0.05)
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    t = asyncio.ensure_future(ticker())
+    try:
+        await ws.execute_agent("discover", None, None)
+    finally:
+        t.cancel()
     assert calls == []
+    assert ticks > 1  # other tasks kept running while execute_agent waited
+    assert ws.agent_status["running"] is False

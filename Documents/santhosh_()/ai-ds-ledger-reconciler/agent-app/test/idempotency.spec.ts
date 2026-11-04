@@ -10,6 +10,7 @@ import { IdempotencyModule } from '../src/idempotency/idempotency.module';
 import { LockService } from '../src/idempotency/lock.service';
 import { IDEMPOTENCY_META, IDEMPOTENCY_OPTIONS } from '../src/idempotency/idempotency.types';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ReconcileDto } from '../src/reconcile/dto/reconcile.dto';
 
 function ctxFor(handler: Function, req: LockedRequest & Record<string, any>): ExecutionContext {
   return {
@@ -54,6 +55,8 @@ describe('IdempotencyLockGuard', () => {
     custom() {}
     @IdempotencyLock({ key: (req: any) => req.headers?.['idempotency-key'] })
     fnKey() {}
+    @IdempotencyLock({ validate: ReconcileDto })
+    validated() {}
   }
   const h = Handlers.prototype;
 
@@ -105,6 +108,25 @@ describe('IdempotencyLockGuard', () => {
       BadRequestException,
     );
     expect(lock.acquire).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['amount as string', { txId: 'tx_1', amount: '100', vendorStatus: 'paid' }],
+    ['missing vendorStatus', { txId: 'tx_1', amount: 100 }],
+    ['unknown extra field', { txId: 'tx_1', amount: 100, vendorStatus: 'paid', x: 1 }],
+  ])('with validate, rejects an invalid body (%s) with 400 before acquiring', async (_l, body) => {
+    const err = await guard.canActivate(ctxFor(h.validated, { body })).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse()).toMatchObject({ statusCode: 400, error: 'Bad Request' });
+    expect(lock.acquire).not.toHaveBeenCalled();
+  });
+
+  it('with validate, acquires the lock for a valid body without mutating it', async () => {
+    const body = { txId: 'tx_1', amount: 100, vendorStatus: 'paid' };
+    const req: LockedRequest = { body };
+    await expect(guard.canActivate(ctxFor(h.validated, req))).resolves.toBe(true);
+    expect(lock.acquire).toHaveBeenCalledWith('tx_1', 10_000);
+    expect(req.body).toBe(body);
   });
 
   it('rejects duplicates with 429 when the lock is already held', async () => {

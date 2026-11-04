@@ -13,6 +13,10 @@ import { IDEMPOTENCY_META, IdempotencyLockOptions } from './idempotency.types';
  *   reconcile(@Body() dto: ReconcileDto) { ... }
  *
  * @example
+ *   // validate the body BEFORE locking, so a malformed payload never takes the lock
+ *   @IdempotencyLock({ validate: ReconcileDto })
+ *
+ * @example
  *   // custom key + TTL, released as soon as the handler finishes
  *   @IdempotencyLock({ key: 'orderId', ttlMs: 30_000, release: 'on-complete' })
  *

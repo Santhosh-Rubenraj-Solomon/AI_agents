@@ -42,6 +42,9 @@ services:
       - REDIS_PORT=6379
       - DATABASE_URL=postgres://ledger:ledger@postgres:5432/ledger
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WEBHOOK_TOLERANCE_SECONDS=${WEBHOOK_TOLERANCE_SECONDS:-300}
+      - WEBHOOK_REQUIRE_TIMESTAMP=${WEBHOOK_REQUIRE_TIMESTAMP:-false}
     depends_on:
       - redis
       - postgres

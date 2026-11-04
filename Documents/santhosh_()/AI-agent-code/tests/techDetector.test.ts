@@ -211,13 +211,31 @@ describe("readRepoFile", () => {
     expect(readRepoFile(root, "dir")).toBeNull();
   });
 
-  // BUG (src/services/techDetector.ts:609): no containment check — "../" escapes the
-  // repo root. advisor.ts feeds file names taken from the *user's chat message* into
-  // readRepoFile and sends the contents to the LLM/chat, so any user can exfiltrate files
-  // readable by the bot process (e.g. "../../../../home/bot/.config/secrets.json").
-  it.skip("BUG: refuses to read files outside the repo root", () => {
+  // Security regression (src/services/techDetector.ts): advisor.ts feeds file names taken
+  // from the user's chat message into readRepoFile, so it must stay inside the repo root.
+  it("refuses to read files outside the repo root", () => {
     const root = tree({ "repo/a.ts": "", "secret.json": '{"token":"s3cr3t"}' });
-    expect(readRepoFile(path.join(root, "repo"), "../secret.json")).toBeNull();
+    const repoDir = path.join(root, "repo");
+    expect(readRepoFile(repoDir, "../secret.json")).toBeNull();
+    expect(readRepoFile(repoDir, "src/../../secret.json")).toBeNull();
+    expect(readRepoFile(repoDir, path.join(root, "secret.json"))).toBeNull();
+    expect(readRepoFile(repoDir, "a.ts")).toBe("");
+  });
+
+  it("refuses symlinks that point outside the repo root but follows internal ones", () => {
+    const root = tree({ "repo/a.ts": "inside", "secret.json": '{"token":"s3cr3t"}' });
+    const repoDir = path.join(root, "repo");
+    fs.symlinkSync(path.join(root, "secret.json"), path.join(repoDir, "link.json"));
+    fs.symlinkSync(root, path.join(repoDir, "up"));
+    fs.symlinkSync(path.join(repoDir, "a.ts"), path.join(repoDir, "alias.ts"));
+    expect(readRepoFile(repoDir, "link.json")).toBeNull();
+    expect(readRepoFile(repoDir, "up/secret.json")).toBeNull();
+    expect(readRepoFile(repoDir, "alias.ts")).toBe("inside");
+  });
+
+  it("allows file names that merely start with two dots", () => {
+    const root = tree({ "..notes.ts": "ok" });
+    expect(readRepoFile(root, "..notes.ts")).toBe("ok");
   });
 });
 

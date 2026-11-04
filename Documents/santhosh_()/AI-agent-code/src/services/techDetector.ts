@@ -606,9 +606,24 @@ export function readRepoFile(
   repoPath: string,
   filePath: string
 ): string | null {
-  const fullPath = path.join(repoPath, filePath);
   try {
+    // Resolve symlinks on both sides and enforce containment: file paths may come
+    // from untrusted chat messages (see agents/advisor.ts), so "../", absolute
+    // paths and symlinks pointing outside the cloned repo must be refused.
+    if (path.isAbsolute(filePath)) return null;
+    const root = fs.realpathSync(repoPath);
+    const fullPath = fs.realpathSync(path.resolve(root, filePath));
+    const rel = path.relative(root, fullPath);
+    if (
+      rel === "" ||
+      rel === ".." ||
+      rel.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rel)
+    ) {
+      return null;
+    }
     const stat = fs.statSync(fullPath);
+    if (!stat.isFile()) return null;
     if (stat.size > CONFIG.limits.maxFileSizeBytes) return null;
     return fs.readFileSync(fullPath, "utf-8");
   } catch {

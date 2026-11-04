@@ -20,6 +20,8 @@ from src.tools.adzuna import adzuna_configured
 
 REAL_DATA = adzuna_configured()
 TEST_MODE = not REAL_DATA
+# Simulated discovery latency in test mode (non-blocking; see execute_agent).
+TEST_MODE_DELAY_SECONDS = 1.0
 
 # Mock generators stay importable (no-key fallback + the tailoring preview).
 from src.test_mode import mock_discovery, mock_tailoring
@@ -459,8 +461,7 @@ async def execute_agent(
         agent_status["phase"] = phase
 
         if TEST_MODE:
-            import time
-            time.sleep(1)
+            await asyncio.sleep(TEST_MODE_DELAY_SECONDS)
             jobs = mock_discovery(skills)
             agent_status["message"] = f"[TEST MODE] Discovery complete: {len(jobs)} mock jobs"
         else:

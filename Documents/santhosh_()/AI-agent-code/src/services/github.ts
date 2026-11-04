@@ -24,10 +24,21 @@ export function parseGitHubUrl(
   // Strip query params, fragments, and trailing slashes before matching
   const cleaned = url.split("?")[0].split("#")[0].replace(/\/+$/, "");
   const match = cleaned.match(
-    /github\.com\/([^/]+)\/([^/.]+?)(?:\.git)?(?:\/.*)?$/
+    /github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/.*)?$/
   );
-  if (match) return { owner: match[1], name: match[2] };
-  return null;
+  if (!match) return null;
+  const [, owner, name] = match;
+  // "." / ".." are not valid owner/repo names (and would escape the clone dir)
+  if (/^\.+$/.test(owner) || /^\.+$/.test(name)) return null;
+  return { owner, name };
+}
+
+/**
+ * Canonical clone URL for a repo, independent of any deep link
+ * (/tree/<branch>, /blob/..., query string) the user pasted.
+ */
+export function canonicalCloneUrl(owner: string, name: string): string {
+  return `https://github.com/${owner}/${name}`;
 }
 
 /**
@@ -74,9 +85,12 @@ export async function cloneOrPullRepo(repoUrl: string): Promise<RepoInfo> {
       to: localPath
     });
 
+    // Never pass the raw user URL to git: deep links (/tree/main, /blob/...)
+    // are not clonable, so always clone the canonical repository URL.
+    const canonical = canonicalCloneUrl(parsed.owner, parsed.name);
     const cloneUrl = CONFIG.github.token
-      ? repoUrl.replace(/https?:\/\//, `https://${CONFIG.github.token}@`)
-      : repoUrl;
+      ? canonical.replace(/^https:\/\//, `https://${CONFIG.github.token}@`)
+      : canonical;
 
     await git.clone(cloneUrl, localPath, ["--depth", "50"]);
 

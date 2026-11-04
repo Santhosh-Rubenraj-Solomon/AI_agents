@@ -371,6 +371,7 @@ Or use /help to see all commands.`,
 
   // /reset
   bot.command("reset", (ctx) => {
+    if (!isAllowed(ctx.from.id)) return ctx.reply("⛔ Not authorized.");
     const session = getSession(ctx.chat.id);
     if (session) {
       deleteSession(session.session_id);

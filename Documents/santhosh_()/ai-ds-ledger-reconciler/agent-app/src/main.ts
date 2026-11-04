@@ -5,7 +5,9 @@ import * as os from 'os';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true keeps the exact request bytes on req.rawBody — the webhook
+  // HMAC signature (WebhookSignatureMiddleware) is computed over them.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   // Let @nestjs lifecycle hooks (e.g. the Redis client's onApplicationShutdown)
   // fire on SIGINT/SIGTERM so connections close cleanly.
