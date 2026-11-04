@@ -63,7 +63,7 @@ def test_update_job_status_with_extra_columns(make_job):
 
 
 def test_update_job_status_unknown_id_is_noop(make_job):
-    memory.update_job_status("ghost", JobStatus.APPROVED)
+    assert memory.update_job_status("ghost", JobStatus.APPROVED) is False
     assert memory.get_job("ghost") is None
 
 

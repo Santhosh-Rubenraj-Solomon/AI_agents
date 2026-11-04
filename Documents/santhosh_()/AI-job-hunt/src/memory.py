@@ -133,7 +133,11 @@ def get_all_jobs(db_path: Optional[str] = None) -> list[Job]:
 
 def update_job_status(
     job_id: str, status: JobStatus, db_path: Optional[str] = None, **kwargs
-) -> None:
+) -> bool:
+    """Update a job's status (and optional extra columns).
+
+    Returns True if a job with ``job_id`` existed and was updated.
+    """
     conn = _get_connection(db_path)
     cur = conn.cursor()
     updates = ["status = ?"]
@@ -145,8 +149,10 @@ def update_job_status(
 
     values.append(job_id)
     cur.execute(f"UPDATE jobs SET {', '.join(updates)} WHERE job_id = ?", values)
+    updated = cur.rowcount > 0
     conn.commit()
     conn.close()
+    return updated
 
 
 def job_exists(job_id: str, db_path: Optional[str] = None) -> bool:

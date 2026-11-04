@@ -14,9 +14,14 @@ export class ReconcileController {
    * A duplicate/concurrent webhook for the same txId is rejected with 429 —
    * before the (expensive) AI agent is ever invoked. With the default
    * `release: 'hold'`, the 10s TTL doubles as an idempotency window.
+   *
+   * Request order: WebhookSignatureMiddleware (401 on a missing/bad HMAC,
+   * see ReconcileModule) -> body validated against ReconcileDto (400) ->
+   * lock acquired (429 on duplicate) -> handler. Unauthenticated or malformed
+   * webhooks therefore never take the lock for their txId.
    */
   @Post('payment-reconcile')
-  @IdempotencyLock() // key = body.txId, 10s idempotency window
+  @IdempotencyLock({ validate: ReconcileDto }) // key = body.txId, 10s idempotency window
   async paymentReconcile(@Body() dto: ReconcileDto) {
     return this.reconcileService.reconcile(dto);
   }

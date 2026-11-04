@@ -7,6 +7,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  ValidationPipe,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import * as os from 'os';
@@ -26,7 +27,8 @@ export interface LockedRequest {
 
 /**
  * Global guard that only acts on handlers decorated with @IdempotencyLock().
- * Acquires the per-key Redis lock before the handler runs; rejects duplicates
+ * Optionally validates the body (`validate: Dto`) first, then acquires the
+ * per-key Redis lock before the handler runs; rejects duplicates
  * with 429. When several replicas receive the same key in the same instant,
  * exactly one wins the `SET NX` — the rest are dropped.
  */
@@ -34,6 +36,12 @@ export interface LockedRequest {
 export class IdempotencyLockGuard implements CanActivate {
   private readonly logger = new Logger('IdempotencyLock');
   private readonly instance = os.hostname();
+  /** Same options as the global pipe in main.ts, so the 400s are identical. */
+  private readonly validationPipe = new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  });
 
   constructor(
     private readonly reflector: Reflector,
@@ -54,6 +62,13 @@ export class IdempotencyLockGuard implements CanActivate {
       throw new BadRequestException(
         'An idempotency key is required but was not present on the request',
       );
+    }
+
+    // Validate BEFORE acquiring: an invalid payload must never take the lock.
+    // (The result is discarded; the global ValidationPipe still transforms the
+    // body for the handler.)
+    if (opts.validate) {
+      await this.validationPipe.transform(req.body, { type: 'body', metatype: opts.validate });
     }
 
     const ttlMs = opts.ttlMs ?? this.moduleOpts.defaultTtlMs ?? 10_000;

@@ -11,8 +11,10 @@ import { IdempotencyRedis } from '../src/idempotency/redis-client.provider';
 import { LedgerRecord } from '../src/ledger/ledger.entity';
 import { ReconcileModule } from '../src/reconcile/reconcile.module';
 import { FakeRedis } from './helpers/fake-redis';
+import { WEBHOOK_AUTH_OPTIONS, computeSignature } from '../src/webhook-auth/webhook-signature';
 
 const mockedGenerateText = generateText as jest.MockedFunction<typeof generateText>;
+const SECRET = 'test-webhook-secret';
 
 /** In-memory replacement for the TypeORM Repository<LedgerRecord>. */
 function makeRepo() {
@@ -55,6 +57,17 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   let repo: ReturnType<typeof makeRepo>;
   const url = '/webhook/payment-reconcile';
 
+  /** POSTs `body` as JSON with a valid HMAC-SHA256 X-Signature over the exact bytes sent. */
+  const post = (body: unknown, opts: { timestamp?: string; secret?: string } = {}) => {
+    const raw = JSON.stringify(body);
+    const req = request(app.getHttpServer())
+      .post(url)
+      .set('Content-Type', 'application/json')
+      .set('X-Signature', `sha256=${computeSignature(opts.secret ?? SECRET, raw, opts.timestamp)}`);
+    if (opts.timestamp !== undefined) req.set('X-Signature-Timestamp', opts.timestamp);
+    return req.send(raw);
+  };
+
   beforeEach(async () => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -71,9 +84,12 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
       .useValue({ client: redis })
       .overrideProvider(getRepositoryToken(LedgerRecord))
       .useValue(repo)
+      .overrideProvider(WEBHOOK_AUTH_OPTIONS)
+      .useValue({ secret: SECRET, toleranceSeconds: 300, requireTimestamp: false })
       .compile();
 
-    app = mod.createNestApplication({ logger: false });
+    // rawBody: true, as in src/main.ts — the signature is checked over the raw bytes.
+    app = mod.createNestApplication({ logger: false, rawBody: true });
     // Same global pipe configuration as src/main.ts (verified in main.spec.ts).
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.listen(0); // init + bind once (avoids per-request listen in supertest); runs LedgerService.onModuleInit -> seeds the 3 demo rows
@@ -89,9 +105,7 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   });
 
   it('reconciles a matching, settled payment to SUCCESS', async () => {
-    const res = await request(app.getHttpServer())
-      .post(url)
-      .send({ txId: 'tx_1001', amount: 100.0, vendorStatus: 'paid' })
+    const res = await post({ txId: 'tx_1001', amount: 100.0, vendorStatus: 'paid' })
       .expect(201);
     expect(res.body).toMatchObject({
       txId: 'tx_1001',
@@ -108,17 +122,13 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   });
 
   it('marks an amount mismatch as FAILED', async () => {
-    const res = await request(app.getHttpServer())
-      .post(url)
-      .send({ txId: 'tx_1002', amount: 9999, vendorStatus: 'paid' })
+    const res = await post({ txId: 'tx_1002', amount: 9999, vendorStatus: 'paid' })
       .expect(201);
     expect(res.body.finalLedgerState.status).toBe('FAILED');
   });
 
   it('no-ops on an already settled transaction', async () => {
-    const res = await request(app.getHttpServer())
-      .post(url)
-      .send({ txId: 'tx_1003', amount: 999, vendorStatus: 'paid' })
+    const res = await post({ txId: 'tx_1003', amount: 999, vendorStatus: 'paid' })
       .expect(201);
     expect(res.body.toolInvocations).toHaveLength(1);
     expect(repo.update).not.toHaveBeenCalled();
@@ -126,9 +136,7 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   });
 
   it('reports unknown transactions with a null final state', async () => {
-    const res = await request(app.getHttpServer())
-      .post(url)
-      .send({ txId: 'tx_9999', amount: 1, vendorStatus: 'paid' })
+    const res = await post({ txId: 'tx_9999', amount: 1, vendorStatus: 'paid' })
       .expect(201);
     expect(res.body.finalLedgerState ?? null).toBeNull();
   });
@@ -136,8 +144,8 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   describe('idempotency lock', () => {
     it('rejects a duplicate txId within the TTL window with 429 before invoking the agent', async () => {
       const body = { txId: 'tx_1001', amount: 100, vendorStatus: 'paid' };
-      await request(app.getHttpServer()).post(url).send(body).expect(201);
-      const dup = await request(app.getHttpServer()).post(url).send(body).expect(429);
+      await post(body).expect(201);
+      const dup = await post(body).expect(429);
       expect(dup.body).toMatchObject({ statusCode: 429, key: 'tx_1001' });
       expect(mockedGenerateText).toHaveBeenCalledTimes(1);
     });
@@ -146,7 +154,7 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
       const body = { txId: 'tx_1001', amount: 100, vendorStatus: 'paid' };
       const codes = await Promise.all(
         Array.from({ length: 10 }, () =>
-          request(app.getHttpServer()).post(url).send(body).then((r) => r.status),
+          post(body).then((r) => r.status),
         ),
       );
       expect(codes.filter((c) => c === 201)).toHaveLength(1);
@@ -154,23 +162,21 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
     });
 
     it('different txIds do not block each other', async () => {
-      await request(app.getHttpServer()).post(url).send({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' }).expect(201);
-      await request(app.getHttpServer()).post(url).send({ txId: 'tx_1002', amount: 250, vendorStatus: 'paid' }).expect(201);
+      await post({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' }).expect(201);
+      await post({ txId: 'tx_1002', amount: 250, vendorStatus: 'paid' }).expect(201);
     });
 
     it('allows reprocessing once the TTL has elapsed', async () => {
       const body = { txId: 'tx_1001', amount: 100, vendorStatus: 'paid' };
-      await request(app.getHttpServer()).post(url).send(body).expect(201);
+      await post(body).expect(201);
       // Expire the stored lock instead of waiting 10s.
       redis.store.get('lock:tx:tx_1001')!.expiresAt = Date.now() - 1;
-      await request(app.getHttpServer()).post(url).send(body).expect(201);
+      await post(body).expect(201);
     });
 
     it('returns 500 when Redis is unavailable (fails closed)', async () => {
       redis.set.mockRejectedValueOnce(new Error('ECONNREFUSED'));
-      await request(app.getHttpServer())
-        .post(url)
-        .send({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' })
+      await post({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' })
         .expect(500);
       expect(mockedGenerateText).not.toHaveBeenCalled();
     });
@@ -178,25 +184,20 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
     it("with 'hold', a failed agent run keeps the lock for the TTL (documented behaviour)", async () => {
       mockedGenerateText.mockRejectedValueOnce(new Error('OpenAI 503'));
       const body = { txId: 'tx_1001', amount: 100, vendorStatus: 'paid' };
-      await request(app.getHttpServer()).post(url).send(body).expect(500);
-      await request(app.getHttpServer()).post(url).send(body).expect(429);
+      await post(body).expect(500);
+      await post(body).expect(429);
     });
 
-    // BUG (src/idempotency/idempotency-lock.guard.ts:51-79 + src/main.ts:18-24):
-    // Nest runs guards BEFORE pipes, so the lock on body.txId is acquired before
-    // the ValidationPipe rejects a malformed payload. With the default 'hold'
-    // strategy a single malformed webhook (e.g. amount sent as a string) poisons
-    // the txId for the whole 10s TTL: the vendor's corrected retry gets 429
-    // instead of being processed. `it.failing` = expected failure (xfail);
-    // it will start "failing" (i.e. alert) once the bug is fixed.
-    it.failing('a rejected (400) malformed webhook should not block a valid retry', async () => {
-      await request(app.getHttpServer())
-        .post(url)
-        .send({ txId: 'tx_1001', amount: 'one hundred', vendorStatus: 'paid' })
+    // Regression: Nest runs guards BEFORE pipes, so the lock on body.txId used to
+    // be acquired before the ValidationPipe rejected a malformed payload, and with
+    // 'hold' the vendor's corrected retry got 429 for the whole TTL. The guard now
+    // validates the body (@IdempotencyLock({ validate: ReconcileDto })) first.
+    it('a rejected (400) malformed webhook does not block a valid retry', async () => {
+      await post({ txId: 'tx_1001', amount: 'one hundred', vendorStatus: 'paid' })
         .expect(400);
-      await request(app.getHttpServer())
-        .post(url)
-        .send({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' })
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(redis.store.has('lock:tx:tx_1001')).toBe(false);
+      await post({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' })
         .expect(201);
     });
   });
@@ -210,22 +211,32 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
       ['numeric txId', { txId: 1001, amount: 100, vendorStatus: 'paid' }],
       ['unknown extra field', { txId: 'tx_1001', amount: 100, vendorStatus: 'paid', hack: true }],
     ])('rejects %s with 400 and never calls the agent', async (_l, body) => {
-      const res = await request(app.getHttpServer()).post(url).send(body).expect(400);
+      const res = await post(body).expect(400);
       expect(res.body.statusCode).toBe(400);
       expect(mockedGenerateText).not.toHaveBeenCalled();
+      expect(redis.set).not.toHaveBeenCalled(); // never takes the idempotency lock
     });
 
     it('rejects a body without txId with 400 (guard: idempotency key required)', async () => {
-      const res = await request(app.getHttpServer())
-        .post(url)
-        .send({ amount: 100, vendorStatus: 'paid' })
+      const res = await post({ amount: 100, vendorStatus: 'paid' })
         .expect(400);
       expect(res.body.message).toMatch(/idempotency key is required/);
       expect(redis.set).not.toHaveBeenCalled();
     });
 
-    it('rejects an empty/non-JSON body with 400', async () => {
-      await request(app.getHttpServer()).post(url).set('Content-Type', 'text/plain').send('hello').expect(400);
+    it('rejects an empty JSON body with 400', async () => {
+      await post({}).expect(400);
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-JSON body (raw body unavailable for signature check) with 401', async () => {
+      await request(app.getHttpServer())
+        .post(url)
+        .set('Content-Type', 'text/plain')
+        .set('X-Signature', `sha256=${computeSignature(SECRET, 'hello')}`)
+        .send('hello')
+        .expect(401);
+      expect(redis.set).not.toHaveBeenCalled();
     });
 
     it('only accepts POST', async () => {
@@ -234,23 +245,78 @@ describe('POST /webhook/payment-reconcile (e2e)', () => {
   });
 
   describe('webhook authenticity', () => {
-    // SECURITY GAP: there is no webhook signature / shared-secret verification
-    // anywhere in src/ (reconcile.controller.ts accepts any JSON body). Anyone
-    // who can reach the endpoint can make the agent mark ledger rows SUCCESS.
-    // Documented as an expected failure until signature checking is added.
-    it.failing('rejects an unsigned webhook', async () => {
+    // Security regression: the endpoint used to accept any JSON body, so anyone
+    // who could reach it could make the agent mark ledger rows SUCCESS.
+    const body = { txId: 'tx_1001', amount: 100, vendorStatus: 'paid' };
+    const expectRejectedBeforeLock = () => {
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(mockedGenerateText).not.toHaveBeenCalled();
+    };
+
+    it('rejects an unsigned webhook with 401 before taking the lock', async () => {
+      const res = await request(app.getHttpServer()).post(url).send(body).expect(401);
+      expect(res.body).toMatchObject({ statusCode: 401, message: 'Invalid or missing webhook signature' });
+      expectRejectedBeforeLock();
+      // ...and it did not poison the txId for the signed retry
+      await post(body).expect(201);
+    });
+
+    it.each([
+      ['wrong secret', { 'X-Signature': `sha256=${computeSignature('other', JSON.stringify(body))}` }],
+      ['garbage signature', { 'X-Signature': 'sha256=not-hex' }],
+      ['truncated signature', { 'X-Signature': computeSignature(SECRET, JSON.stringify(body)).slice(0, 32) }],
+    ])('rejects a %s with 401', async (_l, headers) => {
       await request(app.getHttpServer())
         .post(url)
-        .send({ txId: 'tx_1001', amount: 100, vendorStatus: 'paid' })
+        .set('Content-Type', 'application/json')
+        .set(headers)
+        .send(JSON.stringify(body))
         .expect(401);
+      expectRejectedBeforeLock();
+    });
+
+    it('rejects a body tampered with after signing', async () => {
+      const sig = computeSignature(SECRET, JSON.stringify(body));
+      await request(app.getHttpServer())
+        .post(url)
+        .set('Content-Type', 'application/json')
+        .set('X-Signature', `sha256=${sig}`)
+        .send(JSON.stringify({ ...body, amount: 1 }))
+        .expect(401);
+      expectRejectedBeforeLock();
+    });
+
+    it('verifies over the exact raw bytes (whitespace/key order preserved)', async () => {
+      const raw = '{ "vendorStatus": "paid",\n  "amount": 100.0, "txId": "tx_1001" }';
+      await request(app.getHttpServer())
+        .post(url)
+        .set('Content-Type', 'application/json')
+        .set('X-Signature', computeSignature(SECRET, raw)) // bare hex is accepted too
+        .send(raw)
+        .expect(201);
+    });
+
+    it('accepts a fresh timestamped signature and rejects a stale or re-dated one', async () => {
+      const now = String(Math.floor(Date.now() / 1000));
+      const stale = String(Math.floor(Date.now() / 1000) - 301);
+      await post(body, { timestamp: stale }).expect(401);
+      // replaying the signature with a fresh timestamp header fails the MAC
+      const sig = computeSignature(SECRET, JSON.stringify(body), stale);
+      await request(app.getHttpServer())
+        .post(url)
+        .set('Content-Type', 'application/json')
+        .set('X-Signature', `sha256=${sig}`)
+        .set('X-Signature-Timestamp', now)
+        .send(JSON.stringify(body))
+        .expect(401);
+      expectRejectedBeforeLock();
+      await post(body, { timestamp: now }).expect(201);
     });
   });
 
   it('surfaces agent/LLM failures as 500', async () => {
     mockedGenerateText.mockRejectedValueOnce(new Error('boom'));
-    const res = await request(app.getHttpServer())
-      .post(url)
-      .send({ txId: 'tx_1002', amount: 250, vendorStatus: 'paid' })
+    const res = await post({ txId: 'tx_1002', amount: 250, vendorStatus: 'paid' })
       .expect(500);
     expect(res.body).toEqual({ statusCode: 500, message: 'Internal server error' });
   });

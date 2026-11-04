@@ -62,16 +62,24 @@ def test_company_preference(config, make_job):
     assert d.compute_match_score(make_job(company_name="Other"), config, []).company_pref == 0
 
 
-# BUG: src/phases/discovery.py:59-60. Adzuna returns `created` as an ISO string
-# with a "Z" suffix (e.g. "2026-10-21T08:00:00Z"). On Python < 3.11
-# datetime.fromisoformat() rejects the "Z" (ValueError); on 3.11+ it parses to a
-# tz-AWARE datetime and `datetime.now() - posted` raises TypeError (naive minus
-# aware). Both are swallowed by the except clause, so every live Adzuna job gets
-# the 5-point "unknown date" credit instead of 10 for a fresh posting.
-@pytest.mark.xfail(reason="discovery.py:59 mis-scores tz-aware/'Z' Adzuna dates as unknown", strict=True)
-def test_recency_for_adzuna_utc_timestamp(config, make_job):
-    created = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+# Regression: Adzuna returns `created` with a "Z" suffix. fromisoformat()
+# rejected it on Python < 3.11 and on 3.11+ naive-minus-aware raised TypeError;
+# both were swallowed and scored as "unknown date" (5).
+@pytest.mark.parametrize("age_days,expected", [(1, 10), (10, 5), (30, 0)])
+def test_recency_for_adzuna_utc_timestamp(config, make_job, age_days, expected):
+    created = (datetime.now(timezone.utc) - timedelta(days=age_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert d.compute_match_score(make_job(date_posted=created), config, []).recency == expected
+
+
+def test_recency_for_offset_timestamp(config, make_job):
+    created = (datetime.now(timezone(timedelta(hours=5, minutes=30))) - timedelta(days=2)).isoformat()
     assert d.compute_match_score(make_job(date_posted=created), config, []).recency == 10
+
+
+def test_parse_posted_date_normalises_to_utc():
+    assert d._parse_posted_date("2026-10-21T08:00:00Z") == datetime(2026, 10, 21, 8, tzinfo=timezone.utc)
+    assert d._parse_posted_date("2026-10-21T13:30:00+05:30") == datetime(2026, 10, 21, 8, tzinfo=timezone.utc)
+    assert d._parse_posted_date("2026-10-21T08:00:00").tzinfo is timezone.utc
 
 
 # ── run_discovery ──────────────────────────────────────────────────────────

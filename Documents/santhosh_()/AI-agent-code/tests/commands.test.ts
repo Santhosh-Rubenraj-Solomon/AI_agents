@@ -337,14 +337,17 @@ describe("access control (ALLOWED_USER_IDS=42)", () => {
     expect(replies(ok)[0]).toContain("AI Code Analyzer");
   });
 
-  // BUG (src/handlers/commands.ts:373): /reset skips the isAllowed() check, so a
-  // non-allow-listed user in a group chat can wipe the chat's session.
-  it.skip("BUG: /reset is also restricted to allowed users", async () => {
+  // Regression (src/handlers/commands.ts): /reset used to skip the isAllowed() check.
+  it("/reset is also restricted to allowed users", async () => {
     const { fb, store } = await freshBot();
     const row = makeSessionRow({ chat_id: 70 });
     store.createSession(row);
     const c = makeCtx("/reset", { userId: 7, chatId: 70 });
     await fb.command("reset")(c);
+    expect(replies(c)[0]).toBe("⛔ Not authorized.");
     expect(store.getSessionById(row.session_id)).toBeTruthy();
+    const ok = makeCtx("/reset", { userId: 42, chatId: 70 });
+    await fb.command("reset")(ok);
+    expect(store.getSessionById(row.session_id)).toBeFalsy();
   });
 });

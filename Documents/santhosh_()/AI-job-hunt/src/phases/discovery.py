@@ -1,7 +1,7 @@
 """Phase 1 — Job Discovery: search portals, score, filter, and rank jobs."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -16,6 +16,22 @@ from src.tools.web_search import build_search_queries
 from src.tools.adzuna import search_adzuna, adzuna_configured
 
 # ── Scoring ───────────────────────────────────────────────────────────────
+
+def _parse_posted_date(value: str) -> datetime:
+    """Parse an ISO-8601 date into an aware UTC datetime.
+
+    Handles the trailing "Z" Adzuna uses (rejected by ``fromisoformat`` before
+    Python 3.11). Naive values are treated as local time, matching how mock and
+    scraped dates are produced with ``datetime.now()``.
+    """
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()  # assume local time
+    return parsed.astimezone(timezone.utc)
+
 
 def compute_match_score(
     job: Job,
@@ -56,8 +72,8 @@ def compute_match_score(
     # Recency (10 pts)
     if job.date_posted:
         try:
-            posted = datetime.fromisoformat(job.date_posted)
-            days_ago = (datetime.now() - posted).days
+            posted = _parse_posted_date(job.date_posted)
+            days_ago = (datetime.now(timezone.utc) - posted).days
             if days_ago <= 7:
                 breakdown.recency = 10
             elif days_ago <= 14:

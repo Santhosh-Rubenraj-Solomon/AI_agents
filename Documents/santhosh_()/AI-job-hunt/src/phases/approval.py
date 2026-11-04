@@ -70,9 +70,11 @@ def process_approval_response(response: str) -> list[dict]:
     lines = response.strip().split("\n")
 
     for line in lines:
-        line = line.strip().upper()
+        line = line.strip()
 
-        if line == "STOP":
+        # Only the command keyword is case-insensitive; job ids are matched
+        # exactly (SQLite '=' is case-sensitive and real ids are lower-case).
+        if line.upper() == "STOP":
             # Mark all pending_approval jobs as skipped
             pending = get_jobs_by_status(JobStatus.PENDING_APPROVAL)
             for job in pending:
@@ -87,14 +89,22 @@ def process_approval_response(response: str) -> list[dict]:
         if len(parts) != 2:
             continue
 
-        command, job_id = parts[0], parts[1].strip()
+        command, job_id = parts[0].upper(), parts[1].strip()
 
         if command == "APPROVE":
-            update_job_status(job_id, JobStatus.APPROVED)
-            updates.append({"job_id": job_id, "action": "approved"})
+            new_status, action = JobStatus.APPROVED, "approved"
         elif command == "SKIP":
-            update_job_status(job_id, JobStatus.SKIPPED)
-            updates.append({"job_id": job_id, "action": "skipped"})
+            new_status, action = JobStatus.SKIPPED, "skipped"
+        else:
+            continue
+
+        if update_job_status(job_id, new_status):
+            updates.append({"job_id": job_id, "action": action})
+        else:
+            updates.append({
+                "job_id": job_id,
+                "action": f"not {action} (no job with this id)",
+            })
 
     return updates
 

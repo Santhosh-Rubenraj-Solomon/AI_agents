@@ -183,7 +183,7 @@ Respond concisely but thoroughly. Use markdown formatting. If you reference file
   try {
     // Attempt to read any files the user mentions
     const filePatterns = userMessage.match(
-      /[\w/.-]+\.(ts|js|py|java|go|rs|rb|php|vue|svelte|sql|yaml|yml|json|toml)/g
+      /[\w/.-]+\.(?:tsx|ts|jsx|js|py|java|go|rs|rb|php|vue|svelte|sql|yaml|yml|json|toml)(?![\w-]|\.\w)/g
     );
     let fileContents = "";
     if (filePatterns) {

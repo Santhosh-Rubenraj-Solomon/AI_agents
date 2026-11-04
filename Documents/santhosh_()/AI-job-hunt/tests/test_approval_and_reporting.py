@@ -46,18 +46,28 @@ def test_process_approval_skip_and_stop(make_job):
     assert [j.job_id for j in approval.get_approved_jobs()] == ["A1"]
 
 
-# BUG: src/phases/approval.py:73 upper-cases the WHOLE line, including the job
-# id, so "APPROVE adzuna-123" updates job "ADZUNA-123". SQLite '=' is
-# case-sensitive, so the UPDATE matches nothing, yet the function still reports
-# {"action": "approved"}. Every real id in the system is lower-case
-# (adzuna-<id>, mock ids like "google-backend-swe-001"), so the README's
-# `--phase approve --response "APPROVE <job_id>"` never approves anything.
-@pytest.mark.xfail(reason="approval.py:73 upper-cases job ids; approvals silently no-op", strict=True)
+# Regression: approval.py used to upper-case the WHOLE line, including the job
+# id, so "APPROVE adzuna-123" updated nothing yet reported "approved".
 def test_process_approval_preserves_job_id_case(make_job):
     memory.save_job(make_job("adzuna-123", status=JobStatus.PENDING_APPROVAL))
-    updates = approval.process_approval_response("APPROVE adzuna-123")
-    assert updates == [{"job_id": "adzuna-123", "action": "approved"}]
+    memory.save_job(make_job("google-swe-001", status=JobStatus.PENDING_APPROVAL))
+    updates = approval.process_approval_response("APPROVE adzuna-123\nskip google-swe-001")
+    assert updates == [
+        {"job_id": "adzuna-123", "action": "approved"},
+        {"job_id": "google-swe-001", "action": "skipped"},
+    ]
     assert memory.get_job("adzuna-123").status is JobStatus.APPROVED
+    assert memory.get_job("google-swe-001").status is JobStatus.SKIPPED
+
+
+def test_process_approval_reports_unknown_job_ids(make_job):
+    memory.save_job(make_job("adzuna-123", status=JobStatus.PENDING_APPROVAL))
+    updates = approval.process_approval_response("APPROVE ADZUNA-123\nSKIP ghost")
+    assert updates == [
+        {"job_id": "ADZUNA-123", "action": "not approved (no job with this id)"},
+        {"job_id": "ghost", "action": "not skipped (no job with this id)"},
+    ]
+    assert memory.get_job("adzuna-123").status is JobStatus.PENDING_APPROVAL
 
 
 def test_format_approval_summary():
